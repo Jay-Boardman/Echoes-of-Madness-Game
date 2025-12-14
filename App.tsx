@@ -153,14 +153,15 @@ const App: React.FC = () => {
           connectionsRef.current.push(conn);
           conn.on('open', () => {
               console.log("Host connection opened");
-              addLog("A new player has connected.", false);
               // Send immediate sync using REF to ensure fresh state
               conn.send({ type: 'SYNC', state: gameStateRef.current });
           });
           
           conn.on('data', (data: any) => {
               // Call the ref, which points to the fresh handleNetworkData from current render
-              handleNetworkDataRef.current(data);
+              if (handleNetworkDataRef.current) {
+                  handleNetworkDataRef.current(data);
+              }
           });
 
           conn.on('error', (err: any) => {
@@ -229,26 +230,27 @@ const App: React.FC = () => {
 
   // Host handles incoming actions from Clients
   const handleNetworkData = (data: any) => {
-      // Use Ref to get the true current state, bypassing closure staleness
+      // Use Ref to get the true current state
       const currentState = gameStateRef.current;
       
-      if (currentState.networkMode !== NetworkMode.Host) {
-          console.warn("Ignored action because mode is", currentState.networkMode);
-          return;
-      }
-
       console.log("Host received action:", data.type, data.payload);
 
+      // Perform a single, atomic state update based on action type
       if (data.type === 'ACTION_REGISTER_PLAYER') {
-          console.log("Processing Registration for:", data.payload.name);
-          setGameState(prev => ({
-              ...prev,
-              players: [...prev.players, data.payload]
-          }));
-          addLog(`${data.payload.name} has joined the roster.`, false);
+          setGameState(prev => {
+              const alreadyExists = prev.players.some(p => p.id === data.payload.id || p.name === data.payload.name);
+              if (alreadyExists) return prev;
+
+              return {
+                  ...prev,
+                  players: [...prev.players, data.payload],
+                  log: [...prev.log, `${data.payload.name} has joined the roster.`]
+              };
+          });
+          // Speak side effect outside the reducer
+          speak(`${data.payload.name} has joined the roster.`);
       }
       else if (data.type === 'ACTION_TILE_CLICK') {
-          // Use current state tiles
           const tile = currentState.tiles.find(t => t.id === data.payload.tileId);
           if(tile) handleTileClick(tile, true);
       }
@@ -264,11 +266,11 @@ const App: React.FC = () => {
           endTurn(true);
       }
       else if (data.type === 'ACTION_USE_ITEM') {
-          handleUseItem(data.payload.item, true); // We need to handle `true` to indicate remote in handlers
+          handleUseItem(data.payload.item, true); 
       }
   };
 
-  // Keep ref updated with latest handler
+  // Keep ref updated with latest handler on every render
   useEffect(() => {
       handleNetworkDataRef.current = handleNetworkData;
   });
@@ -333,8 +335,13 @@ const App: React.FC = () => {
 
     const template = INVESTIGATOR_TEMPLATES.find(t => t.id === selectedInvId)!;
     
+    // Ensure Client IDs are unique
+    const uniqueId = gameState.networkMode === NetworkMode.Client 
+        ? `p_${Date.now()}_${Math.floor(Math.random()*1000)}` 
+        : `p_host_${Date.now()}`;
+
     const newPlayer: Player = {
-      id: `p_${Date.now()}_${Math.random().toString(36).substr(2,5)}`, // More unique ID
+      id: uniqueId,
       name: lobbyName,
       investigatorId: selectedInvId,
       color: playerColor,
@@ -355,10 +362,11 @@ const App: React.FC = () => {
 
     if (gameState.networkMode === NetworkMode.Client) {
         // Send player to host
-        console.log("Sending Register Action to Host");
+        console.log("Client Sending Register Action:", newPlayer);
         sendAction('ACTION_REGISTER_PLAYER', newPlayer);
-        // Optimistic UI update (optional, but safer to wait for sync)
+        // We do NOT add to local state immediately; wait for Sync from Host
     } else {
+        // Host adds immediately
         setGameState(prev => ({
             ...prev,
             players: [...prev.players, newPlayer]
@@ -1353,7 +1361,7 @@ const App: React.FC = () => {
                          addLog(`${victim.name} is hit! Took ${damage} Damage and ${horror} Horror.`, true);
                          setGameState(ps => ({ 
                              ...ps, 
-                             phase: GamePhase.Mythos,
+                             phase: GamePhase.Mythos, 
                              activeDiceRoll: undefined, 
                              mythosEvent: { text: ps.mythosEvent?.text || "The attack lands.", type: 'FLAVOR' } 
                          }));
@@ -1848,98 +1856,6 @@ const App: React.FC = () => {
                                        Waiting for Host to start...
                                    </div>
                                )}
-                          </div>
-                      </div>
-                 </div>
-            </div>
-        ) : gameState.phase === GamePhase.ItemDistribution ? (
-            <div className="w-full h-full flex items-center justify-center p-6 bg-[#0a0a0c] bg-[url('https://www.transparenttextures.com/patterns/dark-matter.png')]">
-                 <div className="bg-[#e8dfc5] p-6 max-w-4xl w-full h-[80vh] rounded-sm shadow-2xl border-8 border-[#2b1d0e] relative flex flex-col overflow-hidden">
-                      <div className="absolute inset-0 bg-[url('https://www.transparenttextures.com/patterns/parchment.png')] opacity-50 pointer-events-none mix-blend-multiply"></div>
-                      
-                      <div className="relative z-10 flex flex-col h-full">
-                          <header className="border-b-2 border-black/80 pb-4 mb-4 text-center">
-                              <h2 className="text-3xl text-black font-serif font-bold uppercase tracking-widest">Supply Requisition</h2>
-                              <p className="text-[#5c4033] italic mt-1">Assign equipment before entering the manor.</p>
-                          </header>
-
-                          <div className="flex-1 flex gap-8 min-h-0">
-                                {/* Supply Crate */}
-                                <div className="flex-1 flex flex-col bg-[#dacbb6]/30 border border-[#bfa68a] p-4 rounded-sm">
-                                     <h3 className="text-[#5c4033] font-bold uppercase tracking-widest mb-3 text-center border-b border-[#bfa68a] pb-2">Available Supplies</h3>
-                                     <div className="flex-1 overflow-y-auto space-y-2">
-                                         {distributionItems.map((item, idx) => {
-                                             const itemDef = ITEMS[item];
-                                             const isWeapon = itemDef?.type === 'Weapon';
-                                             return (
-                                                <div 
-                                                    key={idx}
-                                                    onClick={() => setSelectedDistItem(selectedDistItem === idx ? null : idx)}
-                                                    className={`p-3 border-2 cursor-pointer transition-all flex items-center gap-3
-                                                        ${selectedDistItem === idx 
-                                                            ? 'border-red-900 bg-[#d4c5b0] shadow-md scale-[1.02]' 
-                                                            : 'border-[#bfa68a] bg-white/40 hover:bg-white/60'}
-                                                    `}
-                                                >
-                                                    <div className={`w-8 h-8 flex items-center justify-center text-lg rounded-full border border-black/20 ${isWeapon ? 'bg-red-100 text-red-900' : 'bg-blue-100 text-blue-900'}`}>
-                                                        {isWeapon ? '⚔️' : '🎒'}
-                                                    </div>
-                                                    <div>
-                                                        <div className="font-serif font-bold text-[#2b1d0e] leading-none">{item}</div>
-                                                        <div className="text-xs text-[#5c4033] italic mt-1">{itemDef?.description}</div>
-                                                    </div>
-                                                </div>
-                                             );
-                                         })}
-                                         {distributionItems.length === 0 && (
-                                             <div className="text-center text-[#5c4033] italic py-8">All supplies distributed.</div>
-                                         )}
-                                     </div>
-                                </div>
-
-                                {/* Investigators */}
-                                <div className="flex-1 flex flex-col bg-[#dacbb6]/30 border border-[#bfa68a] p-4 rounded-sm">
-                                     <h3 className="text-[#5c4033] font-bold uppercase tracking-widest mb-3 text-center border-b border-[#bfa68a] pb-2">Investigators</h3>
-                                     <div className="flex-1 overflow-y-auto space-y-3">
-                                          {gameState.players.map((p, pIdx) => (
-                                              <div 
-                                                key={p.id}
-                                                onClick={() => assignItemToPlayer(pIdx)}
-                                                className={`p-3 border border-[#bfa68a] bg-[#e8dfc5] relative group transition-all
-                                                    ${selectedDistItem !== null ? 'cursor-pointer hover:border-red-900 hover:shadow-md' : 'opacity-80'}
-                                                `}
-                                              >
-                                                  <div className="flex justify-between items-center mb-2">
-                                                      <span className="font-serif font-bold text-[#2b1d0e]">{p.name}</span>
-                                                      <div className="w-3 h-3 rounded-full border border-black/20" style={{backgroundColor: p.color}}></div>
-                                                  </div>
-                                                  
-                                                  <div className="flex flex-wrap gap-1 min-h-[1.5rem] bg-[#dacbb6]/50 p-1 rounded-sm border-inner">
-                                                      {p.items.map((it, i) => (
-                                                          <span key={i} className="text-[10px] px-1.5 py-0.5 bg-white/60 border border-[#bfa68a] rounded-sm text-[#5c4033]">{it}</span>
-                                                      ))}
-                                                      {p.items.length === 0 && <span className="text-[10px] text-[#5c4033] italic p-0.5">Empty inventory</span>}
-                                                  </div>
-                                                  
-                                                  {selectedDistItem !== null && (
-                                                      <div className="absolute inset-0 bg-red-900/10 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity font-bold text-red-900 uppercase tracking-widest border-2 border-red-900">
-                                                          Assign Item
-                                                      </div>
-                                                  )}
-                                              </div>
-                                          ))}
-                                     </div>
-                                </div>
-                          </div>
-
-                          <div className="mt-6 pt-4 border-t-2 border-black/20 flex justify-end">
-                               <button 
-                                 onClick={generateMapAndIntro} 
-                                 disabled={distributionItems.length > 0 || gameState.networkMode === NetworkMode.Client} 
-                                 className="px-8 py-3 bg-red-900 text-white font-serif uppercase tracking-widest font-bold text-lg hover:bg-red-800 disabled:opacity-50 disabled:cursor-not-allowed shadow-lg border-2 border-red-950"
-                               >
-                                  Confirm Loadout
-                               </button>
                           </div>
                       </div>
                  </div>
