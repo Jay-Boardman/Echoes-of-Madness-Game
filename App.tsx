@@ -20,6 +20,8 @@ import CodePuzzle from './components/CodePuzzle';
 // Declare PeerJS global
 declare const Peer: any;
 
+const PEER_PREFIX = 'echoes-madness-v1-';
+
 const App: React.FC = () => {
   // --- State ---
   const [gameState, setGameState] = useState<GameState>({
@@ -52,6 +54,9 @@ const App: React.FC = () => {
   // State Ref to prevent stale closures in async logic
   const gameStateRef = useRef(gameState);
   useEffect(() => { gameStateRef.current = gameState; }, [gameState]);
+
+  // Handler Ref to prevent stale closures in PeerJS callbacks
+  const handleNetworkDataRef = useRef<(data: any) => void>(() => {});
 
   // Temp state for Lobby/Setup
   const [lobbyName, setLobbyName] = useState('');
@@ -127,26 +132,45 @@ const App: React.FC = () => {
   }, [gameState]);
 
   const initHost = () => {
-      const code = Math.random().toString(36).substring(2, 7).toUpperCase();
-      const peer = new Peer(code); // Attempt to use Code as ID
+      // Generate a short code for display
+      const displayCode = Math.random().toString(36).substring(2, 7).toUpperCase();
+      // Use a prefixed ID for PeerJS to avoid collisions
+      const peerId = PEER_PREFIX + displayCode;
+      
+      console.log("Initializing Host with ID:", peerId);
+
+      const peer = new Peer(peerId);
       
       peer.on('open', (id: string) => {
-          setGameState(prev => ({ ...prev, roomCode: id, networkMode: NetworkMode.Host }));
+          console.log("Host Peer Open. ID:", id);
+          setGameState(prev => ({ ...prev, roomCode: displayCode, networkMode: NetworkMode.Host }));
           setShowTitleScreen(false);
-          addLog(`Room Created! Share Code: ${id}`, false);
+          addLog(`Room Created! Share Code: ${displayCode}`, false);
       });
 
       peer.on('connection', (conn: any) => {
+          console.log("Host received connection");
           connectionsRef.current.push(conn);
           conn.on('open', () => {
+              console.log("Host connection opened");
               addLog("A new player has connected.", false);
-              // Send immediate sync
-              conn.send({ type: 'SYNC', state: gameState });
+              // Send immediate sync using REF to ensure fresh state
+              conn.send({ type: 'SYNC', state: gameStateRef.current });
           });
           
           conn.on('data', (data: any) => {
-              handleNetworkData(data);
+              // Call the ref, which points to the fresh handleNetworkData from current render
+              handleNetworkDataRef.current(data);
           });
+
+          conn.on('error', (err: any) => {
+              console.error("Connection error:", err);
+          });
+      });
+
+      peer.on('error', (err: any) => {
+          console.error("Peer error:", err);
+          alert("Network Error: " + err.type);
       });
 
       peerRef.current = peer;
@@ -154,13 +178,19 @@ const App: React.FC = () => {
 
   const initClient = () => {
       if (!joinCode) return;
-      const peer = new Peer(); // Random ID for client
       
+      const peer = new Peer(); // Random ID for client
+      const targetPeerId = PEER_PREFIX + joinCode.toUpperCase();
+      
+      console.log("Initializing Client. Connecting to:", targetPeerId);
+
       peer.on('open', () => {
-          const conn = peer.connect(joinCode);
+          console.log("Client Peer Open");
+          const conn = peer.connect(targetPeerId);
           clientConnRef.current = conn;
           
           conn.on('open', () => {
+              console.log("Client connected to Host");
               setGameState(prev => ({ ...prev, roomCode: joinCode, networkMode: NetworkMode.Client }));
               setShowTitleScreen(false);
               addLog("Connected to Host!", false);
@@ -174,8 +204,24 @@ const App: React.FC = () => {
           });
 
           conn.on('error', (err: any) => {
+             console.error("Client Connection Error:", err);
              alert("Connection Error: " + err);
           });
+          
+          // Close handler?
+          conn.on('close', () => {
+              alert("Disconnected from host.");
+              resetGame();
+          });
+      });
+      
+      peer.on('error', (err: any) => {
+          console.error("Client Peer Error:", err);
+          if (err.type === 'peer-unavailable') {
+              alert("Room not found. Check the code.");
+          } else {
+              alert("Network Error: " + err.type);
+          }
       });
       
       peerRef.current = peer;
@@ -185,6 +231,8 @@ const App: React.FC = () => {
   const handleNetworkData = (data: any) => {
       if (gameState.networkMode !== NetworkMode.Host) return;
 
+      console.log("Host received action:", data.type);
+
       if (data.type === 'ACTION_REGISTER_PLAYER') {
           setGameState(prev => ({
               ...prev,
@@ -193,7 +241,6 @@ const App: React.FC = () => {
           addLog(`${data.payload.name} has joined the roster.`, false);
       }
       else if (data.type === 'ACTION_TILE_CLICK') {
-          // Find the tile instance from ID to ensure we use current state ref
           const tile = gameState.tiles.find(t => t.id === data.payload.tileId);
           if(tile) handleTileClick(tile, true);
       }
@@ -213,10 +260,17 @@ const App: React.FC = () => {
       }
   };
 
+  // Keep ref updated with latest handler
+  useEffect(() => {
+      handleNetworkDataRef.current = handleNetworkData;
+  });
+
   // Generic Action Sender for Clients
   const sendAction = (type: string, payload: any) => {
       if (clientConnRef.current && clientConnRef.current.open) {
           clientConnRef.current.send({ type, payload });
+      } else {
+          console.warn("Cannot send action, connection not open");
       }
   };
 
@@ -272,7 +326,7 @@ const App: React.FC = () => {
     const template = INVESTIGATOR_TEMPLATES.find(t => t.id === selectedInvId)!;
     
     const newPlayer: Player = {
-      id: `p_${Date.now()}`,
+      id: `p_${Date.now()}_${Math.random().toString(36).substr(2,5)}`, // More unique ID
       name: lobbyName,
       investigatorId: selectedInvId,
       color: playerColor,
@@ -1546,7 +1600,7 @@ const App: React.FC = () => {
                     type="text" 
                     placeholder="Enter Room Code" 
                     value={joinCode}
-                    onChange={(e) => setJoinCode(e.target.value)}
+                    onChange={(e) => setJoinCode(e.target.value.toUpperCase())}
                     className="mt-4 bg-transparent border-b border-[#5c4033] text-center text-xl text-white outline-none uppercase"
                  />
              )}
