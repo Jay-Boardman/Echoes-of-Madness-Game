@@ -229,11 +229,18 @@ const App: React.FC = () => {
 
   // Host handles incoming actions from Clients
   const handleNetworkData = (data: any) => {
-      if (gameState.networkMode !== NetworkMode.Host) return;
+      // Use Ref to get the true current state, bypassing closure staleness
+      const currentState = gameStateRef.current;
+      
+      if (currentState.networkMode !== NetworkMode.Host) {
+          console.warn("Ignored action because mode is", currentState.networkMode);
+          return;
+      }
 
-      console.log("Host received action:", data.type);
+      console.log("Host received action:", data.type, data.payload);
 
       if (data.type === 'ACTION_REGISTER_PLAYER') {
+          console.log("Processing Registration for:", data.payload.name);
           setGameState(prev => ({
               ...prev,
               players: [...prev.players, data.payload]
@@ -241,15 +248,16 @@ const App: React.FC = () => {
           addLog(`${data.payload.name} has joined the roster.`, false);
       }
       else if (data.type === 'ACTION_TILE_CLICK') {
-          const tile = gameState.tiles.find(t => t.id === data.payload.tileId);
+          // Use current state tiles
+          const tile = currentState.tiles.find(t => t.id === data.payload.tileId);
           if(tile) handleTileClick(tile, true);
       }
       else if (data.type === 'ACTION_TOKEN_CLICK') {
-          const token = gameState.tokens.find(t => t.id === data.payload.tokenId);
+          const token = currentState.tokens.find(t => t.id === data.payload.tokenId);
           if(token) handleTokenClick(token, true);
       }
       else if (data.type === 'ACTION_MONSTER_CLICK') {
-          const monster = gameState.monsters.find(m => m.id === data.payload.monsterId);
+          const monster = currentState.monsters.find(m => m.id === data.payload.monsterId);
           if(monster) handleMonsterClick(monster, true);
       }
       else if (data.type === 'ACTION_END_TURN') {
@@ -347,6 +355,7 @@ const App: React.FC = () => {
 
     if (gameState.networkMode === NetworkMode.Client) {
         // Send player to host
+        console.log("Sending Register Action to Host");
         sendAction('ACTION_REGISTER_PLAYER', newPlayer);
         // Optimistic UI update (optional, but safer to wait for sync)
     } else {
@@ -742,15 +751,17 @@ const App: React.FC = () => {
   // --- Interaction Logic ---
 
   const handleTileClick = (tile: Tile, remote = false) => {
-    if (gameState.phase !== GamePhase.Playing) return;
+    // Check if Game is playing
+    const currentState = gameStateRef.current;
+    if (currentState.phase !== GamePhase.Playing) return;
     
     // Network Check
-    if (gameState.networkMode === NetworkMode.Client && !remote) {
+    if (currentState.networkMode === NetworkMode.Client && !remote) {
         sendAction('ACTION_TILE_CLICK', { tileId: tile.id });
         return;
     }
 
-    const player = gameState.players[gameState.currentPlayerIndex];
+    const player = currentState.players[currentState.currentPlayerIndex];
 
     if (player.movesRemaining <= 0) {
         addLog("No moves remaining.", false);
@@ -758,7 +769,7 @@ const App: React.FC = () => {
     }
 
     // MONSTER CHECK: Movement Restriction
-    const monstersOnTile = gameState.monsters.filter(m => m.x === player.x && m.y === player.y);
+    const monstersOnTile = currentState.monsters.filter(m => m.x === player.x && m.y === player.y);
     if (monstersOnTile.length > 0 && (tile.x !== player.x || tile.y !== player.y)) {
         addLog(`${player.name} is engaged by ${monstersOnTile[0].name} and cannot move! Defeat the monster first.`, true);
         return;
@@ -766,7 +777,7 @@ const App: React.FC = () => {
 
     const dist = Math.abs(player.x - tile.x) + Math.abs(player.y - tile.y);
     if (dist === 1) {
-        const updatedPlayers = gameState.players.map(p => 
+        const updatedPlayers = currentState.players.map(p => 
             p.id === player.id 
             ? { ...p, x: tile.x, y: tile.y, movesRemaining: p.movesRemaining - 1 }
             : p
@@ -776,15 +787,16 @@ const App: React.FC = () => {
   };
 
   const handleTokenClick = async (token: Token, remote = false) => {
-    if (gameState.phase !== GamePhase.Playing) return;
+    const currentState = gameStateRef.current;
+    if (currentState.phase !== GamePhase.Playing) return;
 
     // Network Check
-    if (gameState.networkMode === NetworkMode.Client && !remote) {
+    if (currentState.networkMode === NetworkMode.Client && !remote) {
         sendAction('ACTION_TOKEN_CLICK', { tokenId: token.id });
         return;
     }
 
-    const player = gameState.players[gameState.currentPlayerIndex];
+    const player = currentState.players[currentState.currentPlayerIndex];
     
     if (player.x !== token.x || player.y !== token.y) {
       addLog("You must be in the same area to interact.", false);
@@ -817,7 +829,7 @@ const App: React.FC = () => {
       if (dir === 'East') entryX++;
       if (dir === 'West') entryX--;
 
-      const exists = gameState.tiles.find(t => t.x === entryX && t.y === entryY);
+      const exists = currentState.tiles.find(t => t.x === entryX && t.y === entryY);
       if (exists) {
         addLog(`${player.name} opens the door, but it leads to a known room.`, true);
         updatePlayerAction(player.id, -1);
@@ -829,11 +841,11 @@ const App: React.FC = () => {
         return;
       }
 
-      const sourceTile = gameState.tiles.find(t => t.x === originX && t.y === originY);
+      const sourceTile = currentState.tiles.find(t => t.x === originX && t.y === originY);
       const fromType = sourceTile?.imageType || 'hallway';
-      const existingTypes = Array.from(new Set(gameState.tiles.map(t => t.imageType.toLowerCase()))) as string[];
+      const existingTypes = Array.from(new Set(currentState.tiles.map(t => t.imageType.toLowerCase()))) as string[];
 
-      const roomData = await GeminiService.generateRoomDiscovery(dir, gameState.storyContext, fromType, existingTypes);
+      const roomData = await GeminiService.generateRoomDiscovery(dir, currentState.storyContext, fromType, existingTypes);
       const roomName = formatRoomName(roomData.name);
       
       const newTiles: Tile[] = [];
@@ -855,7 +867,7 @@ const App: React.FC = () => {
 
       if (!isHallway && !isCloset) {
           const checkOccupied = (x: number, y: number) => {
-              return gameState.tiles.some(t => t.x === x && t.y === y) || newTiles.some(t => t.x === x && t.y === y);
+              return currentState.tiles.some(t => t.x === x && t.y === y) || newTiles.some(t => t.x === x && t.y === y);
           };
 
           let dx = 0, dy = 0;
@@ -997,13 +1009,13 @@ const App: React.FC = () => {
           });
       });
 
-      const updatedPlayers = gameState.players.map(p => 
+      const updatedPlayers = currentState.players.map(p => 
         p.id === player.id 
         ? { ...p, x: entryX, y: entryY, actionsRemaining: p.actionsRemaining - 1 } 
         : p
       );
 
-      const updatedTokens = gameState.tokens.map(t => 
+      const updatedTokens = currentState.tokens.map(t => 
         t.id === token.id ? { ...t, resolved: true } : t
       );
 
@@ -1296,15 +1308,16 @@ const App: React.FC = () => {
 
   const startMythosPhase = async () => {
     setLoading(true);
-    const round = gameState.round + 1;
+    const currentState = gameStateRef.current;
+    const round = currentState.round + 1;
     addLog(`Round ${round} begins.`, false);
     
-    const result = moveMonsters(gameState);
+    const result = moveMonsters(currentState);
     let movedMonsters = result.monsters;
     setGameState(prev => ({ ...prev, monsters: movedMonsters }));
 
     for (const monster of movedMonsters) {
-       const victim = gameState.players.find(p => p.x === monster.x && p.y === monster.y);
+       const victim = currentState.players.find(p => p.x === monster.x && p.y === monster.y);
        if (victim) {
           const attackNarrative = `${monster.name} attacks ${victim.name}!`;
           addLog(attackNarrative, true);
@@ -1355,11 +1368,11 @@ const App: React.FC = () => {
        }
     }
     
-    const tileBonus = Math.floor(gameState.tiles.length / 3);
+    const tileBonus = Math.floor(currentState.tiles.length / 3);
     let threatLevel = Math.min(round + tileBonus, 10);
-    if (gameState.isEscapeOpen) threatLevel = 10; 
+    if (currentState.isEscapeOpen) threatLevel = 10; 
 
-    const event = await GeminiService.generateMythosEvent(gameState.storyContext, threatLevel);
+    const event = await GeminiService.generateMythosEvent(currentState.storyContext, threatLevel);
 
     setGameState(prev => ({
       ...prev,
@@ -1372,14 +1385,14 @@ const App: React.FC = () => {
     speak(event.narrative);
 
     if (event.type === 'SPAWN') {
-       const maxMonstersPerInvestigator = gameState.difficulty === 'Easy' ? 1 : gameState.difficulty === 'Normal' ? 2 : 3;
-       const maxMonsters = (maxMonstersPerInvestigator * gameState.players.length);
-       const currentLesserMonsters = gameState.monsters.filter(m => m.tier < 3).length;
+       const maxMonstersPerInvestigator = currentState.difficulty === 'Easy' ? 1 : currentState.difficulty === 'Normal' ? 2 : 3;
+       const maxMonsters = (maxMonstersPerInvestigator * currentState.players.length);
+       const currentLesserMonsters = currentState.monsters.filter(m => m.tier < 3).length;
 
-       if (currentLesserMonsters < maxMonsters && gameState.monsters.length < 10) {
+       if (currentLesserMonsters < maxMonsters && currentState.monsters.length < 10) {
            const candidates = MONSTER_TEMPLATES.filter(m => m.tier <= (threatLevel > 8 ? 3 : (threatLevel > 5 ? 2 : 1)));
            const template = candidates[Math.floor(Math.random() * candidates.length)];
-           const tile = gameState.tiles[Math.floor(Math.random() * gameState.tiles.length)];
+           const tile = currentState.tiles[Math.floor(Math.random() * currentState.tiles.length)];
            const newMonster: Monster = {
                id: `mon_${Date.now()}`,
                templateId: template.id,
@@ -1403,7 +1416,7 @@ const App: React.FC = () => {
     if (event.type === 'TEST') {
         const attrStr = event.param || 'Will';
         const attr = Object.values(Attribute).find(a => a === attrStr) || Attribute.Will;
-        const victim = gameState.players[0]; 
+        const victim = currentState.players[0]; 
         
         setTimeout(() => {
            setGameState(prev => ({
@@ -1440,7 +1453,8 @@ const App: React.FC = () => {
   };
 
   const endMythosPhase = () => {
-    if (gameState.players.length === 0) {
+    const currentState = gameStateRef.current;
+    if (currentState.players.length === 0) {
         addLog("ALL INVESTIGATORS ELIMINATED", true);
         setGameState(prev => ({ ...prev, phase: GamePhase.GameOver }));
         return;
@@ -1461,14 +1475,15 @@ const App: React.FC = () => {
   };
 
   const handleMonsterClick = (monster: Monster, remote = false) => {
-    if (gameState.phase !== GamePhase.Playing) return;
+    const currentState = gameStateRef.current;
+    if (currentState.phase !== GamePhase.Playing) return;
 
-    if (gameState.networkMode === NetworkMode.Client && !remote) {
+    if (currentState.networkMode === NetworkMode.Client && !remote) {
         sendAction('ACTION_MONSTER_CLICK', { monsterId: monster.id });
         return;
     }
 
-    const player = gameState.players[gameState.currentPlayerIndex];
+    const player = currentState.players[currentState.currentPlayerIndex];
     if (player.x !== monster.x || player.y !== monster.y) {
         addLog("Too far away.", false);
         return;
@@ -1545,13 +1560,14 @@ const App: React.FC = () => {
   };
 
   const endTurn = (remote = false) => {
-    if (gameState.networkMode === NetworkMode.Client && !remote) {
+    const currentState = gameStateRef.current;
+    if (currentState.networkMode === NetworkMode.Client && !remote) {
         sendAction('ACTION_END_TURN', {});
         return;
     }
 
-    const nextIndex = gameState.currentPlayerIndex + 1;
-    if (nextIndex >= gameState.players.length) startMythosPhase();
+    const nextIndex = currentState.currentPlayerIndex + 1;
+    if (nextIndex >= currentState.players.length) startMythosPhase();
     else setGameState(prev => ({ ...prev, currentPlayerIndex: nextIndex }));
   };
 
