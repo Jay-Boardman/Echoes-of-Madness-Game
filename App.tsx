@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect, useRef } from 'react';
 import { 
   GameState, GamePhase, Player, Investigator, Attribute, 
@@ -132,6 +131,8 @@ const App: React.FC = () => {
   }, [gameState]);
 
   const initHost = () => {
+      if (peerRef.current) return; // Prevent double init
+
       // Generate a short code for display
       const displayCode = Math.random().toString(36).substring(2, 7).toUpperCase();
       // Use a prefixed ID for PeerJS to avoid collisions
@@ -149,15 +150,17 @@ const App: React.FC = () => {
       });
 
       peer.on('connection', (conn: any) => {
-          console.log("Host received connection");
+          console.log("Host received connection from:", conn.peer);
           connectionsRef.current.push(conn);
+          
           conn.on('open', () => {
-              console.log("Host connection opened");
+              console.log("Host connection fully opened");
               // Send immediate sync using REF to ensure fresh state
               conn.send({ type: 'SYNC', state: gameStateRef.current });
           });
           
           conn.on('data', (data: any) => {
+              console.log("Host RAW Data Received:", data);
               // Call the ref, which points to the fresh handleNetworkData from current render
               if (handleNetworkDataRef.current) {
                   handleNetworkDataRef.current(data);
@@ -178,6 +181,7 @@ const App: React.FC = () => {
   };
 
   const initClient = () => {
+      if (peerRef.current) return; // Prevent double init
       if (!joinCode) return;
       
       const peer = new Peer(); // Random ID for client
@@ -230,24 +234,30 @@ const App: React.FC = () => {
 
   // Host handles incoming actions from Clients
   const handleNetworkData = (data: any) => {
-      // Use Ref to get the true current state
       const currentState = gameStateRef.current;
       
-      console.log("Host received action:", data.type, data.payload);
+      console.log("Handling Network Action:", data.type, "Current Mode:", currentState.networkMode);
 
-      // Perform a single, atomic state update based on action type
+      if (currentState.networkMode !== NetworkMode.Host) {
+          console.warn("Ignoring action because not Host.");
+          return;
+      }
+
       if (data.type === 'ACTION_REGISTER_PLAYER') {
           setGameState(prev => {
-              const alreadyExists = prev.players.some(p => p.id === data.payload.id || p.name === data.payload.name);
-              if (alreadyExists) return prev;
+              // Robust check: Only ignore if ID matches exactly. Allow same names (e.g. testing).
+              if (prev.players.some(p => p.id === data.payload.id)) {
+                  console.log("Player ID collision, ignoring.");
+                  return prev;
+              }
 
+              console.log("Registering Player:", data.payload);
               return {
                   ...prev,
                   players: [...prev.players, data.payload],
                   log: [...prev.log, `${data.payload.name} has joined the roster.`]
               };
           });
-          // Speak side effect outside the reducer
           speak(`${data.payload.name} has joined the roster.`);
       }
       else if (data.type === 'ACTION_TILE_CLICK') {
@@ -278,6 +288,7 @@ const App: React.FC = () => {
   // Generic Action Sender for Clients
   const sendAction = (type: string, payload: any) => {
       if (clientConnRef.current && clientConnRef.current.open) {
+          console.log("Sending Action:", type, payload);
           clientConnRef.current.send({ type, payload });
       } else {
           console.warn("Cannot send action, connection not open");
@@ -303,6 +314,10 @@ const App: React.FC = () => {
   const resetGame = () => {
     if (window.speechSynthesis) window.speechSynthesis.cancel();
     if (peerRef.current) peerRef.current.destroy();
+    peerRef.current = null;
+    connectionsRef.current = [];
+    clientConnRef.current = null;
+
     setGameState({
       roomCode: '',
       phase: GamePhase.Lobby,
