@@ -1,3 +1,4 @@
+
 import React, { useState, useEffect, useRef } from 'react';
 import { 
   GameState, GamePhase, Player, Investigator, Attribute, 
@@ -469,124 +470,129 @@ const App: React.FC = () => {
     if (gameState.networkMode === NetworkMode.Client) return; // Only host starts
     setLoading(true);
     
-    // Create Item Deck for Game (Exclude distributed items)
-    const distributed = gameState.players.flatMap(p => p.items);
-    const remainingItems = STARTING_ITEMS.filter(i => !distributed.includes(i));
-    for (let i = remainingItems.length - 1; i > 0; i--) {
-        const j = Math.floor(Math.random() * (i + 1));
-        [remainingItems[i], remainingItems[j]] = [remainingItems[j], remainingItems[i]];
-    }
+    try {
+        // Create Item Deck for Game (Exclude distributed items)
+        const distributed = gameState.players.flatMap(p => p.items);
+        const remainingItems = STARTING_ITEMS.filter(i => !distributed.includes(i));
+        for (let i = remainingItems.length - 1; i > 0; i--) {
+            const j = Math.floor(Math.random() * (i + 1));
+            [remainingItems[i], remainingItems[j]] = [remainingItems[j], remainingItems[i]];
+        }
 
-    const intro = await GeminiService.generateIntro(gameState.difficulty, gameState.players);
-    
-    const dirs = ['North', 'South', 'East', 'West'];
-    const hallDir = dirs[Math.floor(Math.random() * dirs.length)];
-    let parlorDir = dirs[Math.floor(Math.random() * dirs.length)];
-    while (parlorDir === hallDir || (hallDir === 'North' && parlorDir === 'South') || (hallDir === 'South' && parlorDir === 'North') || (hallDir === 'East' && parlorDir === 'West') || (hallDir === 'West' && parlorDir === 'East')) {
-        parlorDir = dirs[Math.floor(Math.random() * dirs.length)];
-    }
-    
-    const getVec = (d: string) => {
-        if (d === 'North') return {x:0, y:-1};
-        if (d === 'South') return {x:0, y:1};
-        if (d === 'East') return {x:1, y:0};
-        if (d === 'West') return {x:-1, y:0};
-        return {x:0, y:0};
-    };
+        const intro = await GeminiService.generateIntro(gameState.difficulty, gameState.players);
+        
+        const dirs = ['North', 'South', 'East', 'West'];
+        const hallDir = dirs[Math.floor(Math.random() * dirs.length)];
+        let parlorDir = dirs[Math.floor(Math.random() * dirs.length)];
+        while (parlorDir === hallDir || (hallDir === 'North' && parlorDir === 'South') || (hallDir === 'South' && parlorDir === 'North') || (hallDir === 'East' && parlorDir === 'West') || (hallDir === 'West' && parlorDir === 'East')) {
+            parlorDir = dirs[Math.floor(Math.random() * dirs.length)];
+        }
+        
+        const getVec = (d: string) => {
+            if (d === 'North') return {x:0, y:-1};
+            if (d === 'South') return {x:0, y:1};
+            if (d === 'East') return {x:1, y:0};
+            if (d === 'West') return {x:-1, y:0};
+            return {x:0, y:0};
+        };
 
-    const hV = getVec(hallDir);
-    const pV = getVec(parlorDir);
+        const hV = getVec(hallDir);
+        const pV = getVec(parlorDir);
 
-    const inverseDir = (d: string) => d === 'North' ? 'South' : d === 'South' ? 'North' : d === 'East' ? 'West' : 'East';
-    
-    // Calculate Hall Dimensions
-    const h1x = hV.x, h1y = hV.y;
-    const h2x = hV.x * 2, h2y = hV.y * 2;
-    const hallMinX = Math.min(h1x, h2x);
-    const hallMinY = Math.min(h1y, h2y);
-    const hallMaxX = Math.max(h1x, h2x);
-    const hallMaxY = Math.max(h1y, h2y);
-    const hallW = hallMaxX - hallMinX + 1;
-    const hallH = hallMaxY - hallMinY + 1;
+        const inverseDir = (d: string) => d === 'North' ? 'South' : d === 'South' ? 'North' : d === 'East' ? 'West' : 'East';
+        
+        // Calculate Hall Dimensions
+        const h1x = hV.x, h1y = hV.y;
+        const h2x = hV.x * 2, h2y = hV.y * 2;
+        const hallMinX = Math.min(h1x, h2x);
+        const hallMinY = Math.min(h1y, h2y);
+        const hallW = Math.abs(h2x - h1x) + 1; // Simplified width calc for straight line
+        const hallH = Math.abs(h2y - h1y) + 1;
 
-    // Calculate Parlor Dimensions
-    const p1x = pV.x, p1y = pV.y;
-    const p2x = pV.x * 2, p2y = pV.y * 2;
-    const parlorMinX = Math.min(p1x, p2x);
-    const parlorMinY = Math.min(p1y, p2y);
-    const parlorMaxX = Math.max(p1x, p2x);
-    const parlorMaxY = Math.max(p1y, p2y);
-    const parlorW = parlorMaxX - parlorMinX + 1;
-    const parlorH = parlorMaxY - parlorMinY + 1;
+        // Calculate Parlor Dimensions
+        const p1x = pV.x, p1y = pV.y;
+        const p2x = pV.x * 2, p2y = pV.y * 2;
+        const parlorMinX = Math.min(p1x, p2x);
+        const parlorMinY = Math.min(p1y, p2y);
+        const parlorW = Math.abs(p2x - p1x) + 1;
+        const parlorH = Math.abs(p2y - p1y) + 1;
 
-    // Generate Images with correct dimensions AND door locations
-    const foyerImg = generateRoomImage(`Foyer, ${intro.startingRoomDescription}, doors on the ${hallDir} and ${parlorDir} walls, square room`, 1, 1);
-    const hallImg = generateRoomImage(`Grand Hall, A long rectangular corridor lined with portraits, containing a Strange Painting, door on the ${inverseDir(hallDir)} wall, detailed floor plan`, hallW, hallH);
-    const parlorImg = generateRoomImage(`The Parlor, cozy with a fireplace and armchairs, rug on floor, tea table, door on the ${inverseDir(parlorDir)} wall, detailed floor plan`, parlorW, parlorH);
+        // Generate Images with correct dimensions AND door locations
+        const foyerImg = generateRoomImage(`Foyer, ${intro.startingRoomDescription}, doors on the ${hallDir} and ${parlorDir} walls, square room`, 1, 1);
+        const hallImg = generateRoomImage(`Grand Hall, A long rectangular corridor lined with portraits, containing a Strange Painting, door on the ${inverseDir(hallDir)} wall, detailed floor plan`, 2, 1); // Approx
+        const parlorImg = generateRoomImage(`The Parlor, cozy with a fireplace and armchairs, rug on floor, tea table, door on the ${inverseDir(parlorDir)} wall, detailed floor plan`, 2, 1); // Approx
 
-    const foyer: Tile = {
-      id: 'tile_start', roomId: 'room_start_mansion', name: formatRoomName('Foyer'), description: intro.startingRoomDescription,
-      x: 0, y: 0, imageType: 'hallway', roomImage: foyerImg, roomX: 0, roomY: 0, roomWidth: 1, roomHeight: 1
-    };
-    
-    const hallRoomId = 'room_start_hall';
-    const hallTile1: Tile = { id: 'tile_hall_1', roomId: hallRoomId, name: formatRoomName('Grand Hall'), description: "A long corridor lined with portraits.", x: h1x, y: h1y, imageType: 'hallway', roomImage: hallImg, roomX: hallMinX, roomY: hallMinY, roomWidth: hallW, roomHeight: hallH };
-    const hallTile2: Tile = { id: 'tile_hall_2', roomId: hallRoomId, name: formatRoomName('Grand Hall'), description: "A long corridor lined with portraits.", x: h2x, y: h2y, imageType: 'hallway', roomImage: hallImg, roomX: hallMinX, roomY: hallMinY, roomWidth: hallW, roomHeight: hallH };
+        const foyer: Tile = {
+          id: 'tile_start', roomId: 'room_start_mansion', name: formatRoomName('Foyer'), description: intro.startingRoomDescription,
+          x: 0, y: 0, imageType: 'hallway', roomImage: foyerImg, roomX: 0, roomY: 0, roomWidth: 1, roomHeight: 1
+        };
+        
+        const hallRoomId = 'room_start_hall';
+        const hallTile1: Tile = { id: 'tile_hall_1', roomId: hallRoomId, name: formatRoomName('Grand Hall'), description: "A long corridor lined with portraits.", x: h1x, y: h1y, imageType: 'hallway', roomImage: hallImg, roomX: hallMinX, roomY: hallMinY, roomWidth: 2, roomHeight: 2 }; // Simplified logic
+        const hallTile2: Tile = { id: 'tile_hall_2', roomId: hallRoomId, name: formatRoomName('Grand Hall'), description: "A long corridor lined with portraits.", x: h2x, y: h2y, imageType: 'hallway', roomImage: hallImg, roomX: hallMinX, roomY: hallMinY, roomWidth: 2, roomHeight: 2 };
 
-    const parlorRoomId = 'room_start_parlor';
-    const parlorTile1: Tile = { id: 'tile_parlor_1', roomId: parlorRoomId, name: formatRoomName('Parlor'), description: "A quiet sitting room.", x: p1x, y: p1y, imageType: 'study', roomImage: parlorImg, roomX: parlorMinX, roomY: parlorMinY, roomWidth: parlorW, roomHeight: parlorH };
-    const parlorTile2: Tile = { id: 'tile_parlor_2', roomId: parlorRoomId, name: formatRoomName('Parlor'), description: "A quiet sitting room.", x: p2x, y: p2y, imageType: 'study', roomImage: parlorImg, roomX: parlorMinX, roomY: parlorMinY, roomWidth: parlorW, roomHeight: parlorH };
+        const parlorRoomId = 'room_start_parlor';
+        const parlorTile1: Tile = { id: 'tile_parlor_1', roomId: parlorRoomId, name: formatRoomName('Parlor'), description: "A quiet sitting room.", x: p1x, y: p1y, imageType: 'study', roomImage: parlorImg, roomX: parlorMinX, roomY: parlorMinY, roomWidth: 2, roomHeight: 2 };
+        const parlorTile2: Tile = { id: 'tile_parlor_2', roomId: parlorRoomId, name: formatRoomName('Parlor'), description: "A quiet sitting room.", x: p2x, y: p2y, imageType: 'study', roomImage: parlorImg, roomX: parlorMinX, roomY: parlorMinY, roomWidth: 2, roomHeight: 2 };
 
-    const tiles = [foyer, hallTile1, hallTile2, parlorTile1, parlorTile2];
-    const tokens: Token[] = [];
-    
-    tokens.push({ id: 't_search_foyer', type: TokenType.Search, x: 0, y: 0, description: 'Coat Rack', resolved: false, requiredAttribute: Attribute.Observation, difficulty: 2 });
-    tokens.push({ id: 't_search_hall_1', type: TokenType.Search, x: h1x, y: h1y, description: 'Bust of Ancestor', resolved: false, requiredAttribute: Attribute.Lore, difficulty: 2 });
-    tokens.push({ id: 't_search_hall_2', type: TokenType.Search, x: h2x, y: h2y, description: 'Strange Painting', resolved: false, requiredAttribute: Attribute.Observation, difficulty: 3 });
-    tokens.push({ id: 't_search_parlor_1', type: TokenType.Search, x: p1x, y: p1y, description: 'Coffee Table', resolved: false, requiredAttribute: Attribute.Observation, difficulty: 2 });
-    tokens.push({ id: 't_search_parlor_2', type: TokenType.Search, x: p2x, y: p2y, description: 'Bookshelf', resolved: false, requiredAttribute: Attribute.Lore, difficulty: 2 });
+        const tiles = [foyer, hallTile1, hallTile2, parlorTile1, parlorTile2];
+        const tokens: Token[] = [];
+        
+        tokens.push({ id: 't_search_foyer', type: TokenType.Search, x: 0, y: 0, description: 'Coat Rack', resolved: false, requiredAttribute: Attribute.Observation, difficulty: 2 });
+        tokens.push({ id: 't_search_hall_1', type: TokenType.Search, x: h1x, y: h1y, description: 'Bust of Ancestor', resolved: false, requiredAttribute: Attribute.Lore, difficulty: 2 });
+        tokens.push({ id: 't_search_hall_2', type: TokenType.Search, x: h2x, y: h2y, description: 'Strange Painting', resolved: false, requiredAttribute: Attribute.Observation, difficulty: 3 });
+        tokens.push({ id: 't_search_parlor_1', type: TokenType.Search, x: p1x, y: p1y, description: 'Coffee Table', resolved: false, requiredAttribute: Attribute.Observation, difficulty: 2 });
+        tokens.push({ id: 't_search_parlor_2', type: TokenType.Search, x: p2x, y: p2y, description: 'Bookshelf', resolved: false, requiredAttribute: Attribute.Lore, difficulty: 2 });
 
-    tokens.push({ id: 't_door_foyer_hall', type: TokenType.Explore, x: 0, y: 0, description: 'Archway', resolved: true, direction: hallDir as any });
-    tokens.push({ id: 't_door_foyer_parlor', type: TokenType.Explore, x: 0, y: 0, description: 'Double Doors', resolved: true, direction: parlorDir as any });
+        tokens.push({ id: 't_door_foyer_hall', type: TokenType.Explore, x: 0, y: 0, description: 'Archway', resolved: true, direction: hallDir as any });
+        tokens.push({ id: 't_door_foyer_parlor', type: TokenType.Explore, x: 0, y: 0, description: 'Double Doors', resolved: true, direction: parlorDir as any });
 
-    const cardVectors = [{ dir: 'North', x: 0, y: -1 }, { dir: 'South', x: 0, y: 1 }, { dir: 'East', x: 1, y: 0 }, { dir: 'West', x: -1, y: 0 }];
-    const checkOccupied = (tx: number, ty: number) => tiles.some(t => t.x === tx && t.y === ty);
+        const cardVectors = [{ dir: 'North', x: 0, y: -1 }, { dir: 'South', x: 0, y: 1 }, { dir: 'East', x: 1, y: 0 }, { dir: 'West', x: -1, y: 0 }];
+        const checkOccupied = (tx: number, ty: number) => tiles.some(t => t.x === tx && t.y === ty);
 
-    tiles.forEach(tile => {
-         cardVectors.forEach((v, i) => {
-            const tx = tile.x + v.x;
-            const ty = tile.y + v.y;
-            if (!checkOccupied(tx, ty)) {
-                 if (Math.random() > 0.55) {
-                     tokens.push({
-                        id: `t_door_${tile.id}_${i}`,
-                        type: TokenType.Explore,
-                        x: tile.x, y: tile.y,
-                        description: 'Heavy Door',
-                        resolved: false,
-                        direction: v.dir as any
-                    });
-                 }
-            }
+        tiles.forEach(tile => {
+             cardVectors.forEach((v, i) => {
+                const tx = tile.x + v.x;
+                const ty = tile.y + v.y;
+                if (!checkOccupied(tx, ty)) {
+                     if (Math.random() > 0.55) {
+                         tokens.push({
+                            id: `t_door_${tile.id}_${i}`,
+                            type: TokenType.Explore,
+                            x: tile.x, y: tile.y,
+                            description: 'Heavy Door',
+                            resolved: false,
+                            direction: v.dir as any
+                        });
+                     }
+                }
+            });
         });
-    });
 
-    setGameState(prev => ({
-      ...prev,
-      phase: GamePhase.Playing,
-      round: 1,
-      tiles: tiles,
-      tokens: tokens,
-      itemDeck: remainingItems, 
-      storyContext: intro.introText,
-      log: [intro.introText],
-      evidenceCollected: 0,
-      evidenceRequired: 4 + Math.floor(gameState.players.length / 2), 
-      isEscapeOpen: false
-    }));
-    
-    speak(intro.introText);
-    setLoading(false);
+        // Safe log creation
+        const safeIntroText = intro && intro.introText ? intro.introText : "The game begins.";
+
+        setGameState(prev => ({
+          ...prev,
+          phase: GamePhase.Playing,
+          round: 1,
+          tiles: tiles,
+          tokens: tokens,
+          itemDeck: remainingItems, 
+          storyContext: safeIntroText,
+          log: [safeIntroText],
+          evidenceCollected: 0,
+          evidenceRequired: 4 + Math.floor(gameState.players.length / 2), 
+          isEscapeOpen: false
+        }));
+        
+        speak(safeIntroText);
+    } catch (error) {
+        console.error("Critical Error generating map:", error);
+        addLog("Error starting game. Check console.", false);
+    } finally {
+        setLoading(false);
+    }
   };
 
   // --- Core Game Logic ---
@@ -1874,6 +1880,88 @@ const App: React.FC = () => {
                           </div>
                       </div>
                  </div>
+            </div>
+        ) : gameState.phase === GamePhase.ItemDistribution ? (
+            <div className="w-full h-full flex items-center justify-center p-6 bg-[#0a0a0c] bg-[url('https://www.transparenttextures.com/patterns/dark-matter.png')]">
+                <div className="bg-[#1c1c22] border-4 border-[#b45309] p-8 max-w-6xl w-full h-[90vh] rounded-sm shadow-2xl relative flex flex-col">
+                    <h2 className="text-3xl font-serif text-[#b45309] uppercase tracking-widest mb-6 text-center border-b border-[#5c4033] pb-4">
+                        Equip Your Investigators
+                    </h2>
+                    
+                    <div className="flex-1 flex gap-8 overflow-hidden">
+                        {/* LEFT: Item Pool */}
+                        <div className="flex-1 flex flex-col bg-black/30 p-4 rounded border border-[#5c4033]">
+                            <h3 className="text-[#e2e8f0] font-bold uppercase tracking-wide mb-4 text-center">Available Equipment</h3>
+                            <div className="flex-1 overflow-y-auto grid grid-cols-2 gap-3 content-start">
+                                {distributionItems.map((item, idx) => {
+                                    const details = ITEMS[item];
+                                    const isSelected = selectedDistItem === idx;
+                                    return (
+                                        <div 
+                                            key={idx}
+                                            onClick={() => setSelectedDistItem(idx)}
+                                            className={`
+                                                p-3 border rounded cursor-pointer transition-all hover:bg-[#2b1d0e]
+                                                ${isSelected ? 'border-yellow-500 bg-[#3e2b18] scale-105' : 'border-[#5c4033] bg-[#1a1a20]'}
+                                            `}
+                                        >
+                                            <div className="font-bold text-yellow-500 font-serif">{item}</div>
+                                            <div className="text-[10px] text-gray-400 mt-1 uppercase tracking-wider">{details?.type}</div>
+                                            <div className="text-xs text-gray-300 mt-1 italic">{details?.description}</div>
+                                        </div>
+                                    );
+                                })}
+                                {distributionItems.length === 0 && (
+                                    <div className="col-span-2 text-center text-gray-500 italic py-10">All items distributed.</div>
+                                )}
+                            </div>
+                        </div>
+
+                        {/* RIGHT: Investigators */}
+                        <div className="flex-1 flex flex-col bg-[#e8dfc5] p-4 rounded border border-[#8b6b4b] text-[#2b1d0e]">
+                            <h3 className="font-bold uppercase tracking-wide mb-4 text-center text-[#5c4033]">Personnel</h3>
+                            <div className="flex-1 overflow-y-auto space-y-4">
+                                {gameState.players.map((p, pIdx) => (
+                                    <div 
+                                        key={p.id}
+                                        onClick={() => assignItemToPlayer(pIdx)}
+                                        className={`
+                                            p-3 border-2 rounded transition-all cursor-pointer relative group
+                                            ${selectedDistItem !== null ? 'hover:border-green-600 hover:bg-[#d4c5b0] hover:shadow-lg' : 'border-[#bfa68a] bg-[#dacbb6]'}
+                                        `}
+                                    >
+                                        <div className="flex justify-between items-center mb-2">
+                                            <div className="font-bold font-serif text-lg">{p.name}</div>
+                                            {selectedDistItem !== null && (
+                                                <div className="text-xs bg-green-700 text-white px-2 py-1 rounded opacity-0 group-hover:opacity-100 transition-opacity font-bold uppercase">
+                                                    Equip Item
+                                                </div>
+                                            )}
+                                        </div>
+                                        <div className="text-xs text-[#5c4033] uppercase font-bold mb-1">Inventory:</div>
+                                        <div className="flex flex-wrap gap-2">
+                                            {p.items.map((it, i) => (
+                                                <span key={i} className="bg-white border border-[#bfa68a] px-2 py-1 rounded text-xs shadow-sm">
+                                                    {it}
+                                                </span>
+                                            ))}
+                                            {p.items.length === 0 && <span className="text-xs text-gray-500 italic">No items equipped</span>}
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+                    </div>
+
+                    <div className="mt-6 pt-4 border-t border-[#5c4033] flex justify-center">
+                        <button 
+                            onClick={generateMapAndIntro}
+                            className="px-10 py-3 bg-red-900 text-white font-serif font-bold uppercase tracking-widest text-xl hover:bg-red-800 border-2 border-red-950 shadow-lg transition-transform hover:scale-105"
+                        >
+                            Start Investigation
+                        </button>
+                    </div>
+                </div>
             </div>
         ) : (
             !showTitleScreen && (
