@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { 
   GameState, GamePhase, Player, Investigator, Attribute, 
-  Tile, Token, TokenType, DiceFace, Monster, NetworkMode, PuzzleType 
+  Tile, Token, TokenType, DiceFace, Monster, NetworkMode, PuzzleType, ActionContext
 } from './types';
 import { 
   INVESTIGATOR_TEMPLATES, ITEMS, STARTING_ITEMS, DICE_FACES, MONSTER_TEMPLATES, generateRoomImage 
@@ -124,9 +124,10 @@ const App: React.FC = () => {
   // Host: Broadcast state changes to all clients
   useEffect(() => {
       if (gameState.networkMode === NetworkMode.Host && connectionsRef.current.length > 0) {
+          const syncData = { type: 'SYNC', state: gameState };
           connectionsRef.current.forEach(conn => {
               if (conn.open) {
-                  conn.send({ type: 'SYNC', state: gameState });
+                  conn.send(syncData);
               }
           });
       }
@@ -294,22 +295,20 @@ const App: React.FC = () => {
           setGameState(prev => {
               // Allow updating if already exists (re-register logic) to handle retries
               const existsIndex = prev.players.findIndex(p => p.id === data.payload.id);
+              let updatedPlayers = [...prev.players];
               
               if (existsIndex !== -1) {
                   // Update existing
                   console.log("Updating existing player:", data.payload);
-                  const updatedPlayers = [...prev.players];
                   updatedPlayers[existsIndex] = data.payload;
-                  return {
-                      ...prev,
-                      players: updatedPlayers
-                  };
+              } else {
+                  console.log("Registering New Player:", data.payload);
+                  updatedPlayers.push(data.payload);
               }
 
-              console.log("Registering New Player:", data.payload);
               return {
                   ...prev,
-                  players: [...prev.players, data.payload],
+                  players: updatedPlayers,
                   log: [...prev.log, `${data.payload.name} has joined the roster.`]
               };
           });
@@ -340,6 +339,10 @@ const App: React.FC = () => {
       }
       else if (data.type === 'ACTION_USE_ITEM') {
           handleUseItem(data.payload.item, true); 
+      }
+      else if (data.type === 'ACTION_COMPLETE_TASK') {
+          // New: Client reports completion of a task (Dice Roll or Puzzle)
+          handleActionComplete(data.payload.context, data.payload.success, data.payload.data);
       }
   };
 
@@ -458,11 +461,6 @@ const App: React.FC = () => {
             players: [...prev.players, newPlayer]
         }));
     }
-    
-    // Don't clear selections immediately so they can re-send if needed
-    // setLobbyName('');
-    // setSelectedInvId(null);
-    // setPreviewInvId(null);
   };
 
   const toggleReady = () => {
@@ -877,6 +875,39 @@ const App: React.FC = () => {
     }));
   };
 
+  // --- New Centralized Action Resolution Logic ---
+  
+  const handleActionComplete = (context: ActionContext, success: boolean, data?: any) => {
+      // If we are Client, we must send this to Host
+      if (gameState.networkMode === NetworkMode.Client) {
+          sendAction('ACTION_COMPLETE_TASK', { context, success, data });
+          
+          // Clear local UI immediately for responsiveness
+          setGameState(prev => ({
+              ...prev,
+              activeDiceRoll: undefined,
+              activePuzzle: undefined,
+              phase: GamePhase.Playing // Return to playing pending sync
+          }));
+          return;
+      }
+
+      // HOST LOGIC (also runs if offline)
+      console.log("Resolving Action:", context, success);
+
+      if (context.type === 'SEARCH') {
+          const token = gameState.tokens.find(t => t.id === context.tokenId);
+          if (token) {
+              resolveSearch(token, success, data); // data is rolls array
+          } else {
+              // Token likely gone already?
+              setGameState(prev => ({ ...prev, phase: GamePhase.Playing, activeDiceRoll: undefined, activePuzzle: undefined }));
+          }
+      } else if (context.type === 'COMBAT') {
+          resolveCombat(context.monsterId, success, data); // data is damage amount
+      }
+  };
+
   // --- Interaction Logic ---
 
   const handleTileClick = (tile: Tile, remote = false) => {
@@ -1175,8 +1206,7 @@ const App: React.FC = () => {
               activePuzzle: {
                   type: puzzleType,
                   token: token,
-                  onSuccess: () => resolveSearch(token, true, []),
-                  onFail: () => resolveSearch(token, false, [])
+                  context: { type: 'SEARCH', tokenId: token.id }
               }
           }));
       } else {
@@ -1192,8 +1222,7 @@ const App: React.FC = () => {
               count: count,
               target: token.difficulty || 1,
               description: token.description,
-              onSuccess: (rolls) => resolveSearch(token, true, rolls),
-              onFail: (rolls) => resolveSearch(token, false, rolls)
+              context: { type: 'SEARCH', tokenId: token.id }
             }
           }));
       }
@@ -1490,8 +1519,7 @@ const App: React.FC = () => {
               count: str,
               target: 2, 
               description: `Attacking ${monster.name}`,
-              onSuccess: () => resolveCombat(monster.id, true, totalDmg),
-              onFail: () => resolveCombat(monster.id, false, 0)
+              context: { type: 'COMBAT', monsterId: monster.id }
           }
       }));
       
@@ -1985,21 +2013,21 @@ const App: React.FC = () => {
                 usedItemAbilityRound={currentPlayer.usedItemAbilityRound}
                 onComplete={(faces, cluesSpent) => {
                     const successes = faces.filter(f => f === DiceFace.ElderSign).length;
-                    if (successes >= gameState.activeDiceRoll!.target) {
-                        gameState.activeDiceRoll!.onSuccess(faces);
-                    } else {
-                        gameState.activeDiceRoll!.onFail(faces);
-                    }
+                    const success = successes >= gameState.activeDiceRoll!.target;
+                    
                     if (cluesSpent > 0) {
                         setGameState(prev => ({
                             ...prev,
                             players: prev.players.map(p => p.id === currentPlayer.id ? { ...p, clues: p.clues - cluesSpent } : p)
                         }));
                     }
+                    
+                    // Centralized completion handler
+                    handleActionComplete(gameState.activeDiceRoll!.context, success, faces);
                 }}
                 onConsumeItem={handleConsumeItem}
                 onMarkItemUsed={handleMarkItemUsed}
-                onCancel={() => {}} // Can't cancel active rolls usually
+                onCancel={() => {}} 
              />
         )}
 
@@ -2008,20 +2036,20 @@ const App: React.FC = () => {
             <>
                 {gameState.activePuzzle.type === PuzzleType.Sliding && (
                     <SlidingPuzzle 
-                        onComplete={gameState.activePuzzle.onSuccess} 
-                        onFail={gameState.activePuzzle.onFail} 
+                        onComplete={() => handleActionComplete(gameState.activePuzzle!.context, true)} 
+                        onFail={() => handleActionComplete(gameState.activePuzzle!.context, false)} 
                     />
                 )}
                 {gameState.activePuzzle.type === PuzzleType.Rune && (
                     <RunePuzzle 
-                        onComplete={gameState.activePuzzle.onSuccess} 
-                        onFail={gameState.activePuzzle.onFail} 
+                        onComplete={() => handleActionComplete(gameState.activePuzzle!.context, true)} 
+                        onFail={() => handleActionComplete(gameState.activePuzzle!.context, false)} 
                     />
                 )}
                 {gameState.activePuzzle.type === PuzzleType.Code && (
                     <CodePuzzle 
-                        onComplete={gameState.activePuzzle.onSuccess} 
-                        onFail={gameState.activePuzzle.onFail} 
+                        onComplete={() => handleActionComplete(gameState.activePuzzle!.context, true)} 
+                        onFail={() => handleActionComplete(gameState.activePuzzle!.context, false)} 
                     />
                 )}
             </>
