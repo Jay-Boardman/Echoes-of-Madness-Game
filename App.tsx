@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect, useRef } from 'react';
 import { 
   GameState, GamePhase, Player, Investigator, Attribute, 
@@ -143,7 +142,9 @@ const App: React.FC = () => {
       
       console.log("Initializing Host with ID:", peerId);
 
-      const peer = new Peer(peerId);
+      const peer = new Peer(peerId, {
+          debug: 1
+      });
       
       peer.on('open', (id: string) => {
           console.log("Host Peer Open. ID:", id);
@@ -158,7 +159,7 @@ const App: React.FC = () => {
           connectionsRef.current.push(conn);
           
           conn.on('open', () => {
-              console.log("Host connection fully opened");
+              console.log("Host connection fully opened with", conn.peer);
               // Send immediate sync using REF to ensure fresh state
               conn.send({ type: 'SYNC', state: gameStateRef.current });
           });
@@ -200,14 +201,20 @@ const App: React.FC = () => {
 
       setLoading(true);
       
-      const peer = new Peer(); // Random ID for client
+      const peer = new Peer(undefined, {
+          debug: 1
+      }); 
       const targetPeerId = PEER_PREFIX + joinCode.toUpperCase();
       
       console.log("Initializing Client. Connecting to:", targetPeerId);
 
       peer.on('open', () => {
-          console.log("Client Peer Open");
-          const conn = peer.connect(targetPeerId);
+          console.log("Client Peer Open. ID:", peer.id);
+          // Explicit serialization: json
+          const conn = peer.connect(targetPeerId, { 
+              serialization: 'json',
+              reliable: true
+          });
           clientConnRef.current = conn;
           
           conn.on('open', () => {
@@ -219,6 +226,7 @@ const App: React.FC = () => {
           });
 
           conn.on('data', (data: any) => {
+              // console.log("Client Received Data:", data); // Verbose
               if (data.type === 'SYNC') {
                   // Client receives authoritative state from Host
                   setGameState(data.state);
@@ -260,7 +268,7 @@ const App: React.FC = () => {
   const handleNetworkData = (data: any) => {
       const currentState = gameStateRef.current;
       
-      console.log("Handling Network Action:", data.type, "Current Mode:", currentState.networkMode);
+      // console.log("Handling Network Action:", data.type, "Current Mode:", currentState.networkMode);
 
       if (currentState.networkMode !== NetworkMode.Host) {
           console.warn("Ignoring action because not Host.");
@@ -269,13 +277,21 @@ const App: React.FC = () => {
 
       if (data.type === 'ACTION_REGISTER_PLAYER') {
           setGameState(prev => {
-              // Robust check: Only ignore if ID matches exactly. Allow same names (e.g. testing).
-              if (prev.players.some(p => p.id === data.payload.id)) {
-                  console.log("Player ID collision, ignoring.");
-                  return prev;
+              // Allow updating if already exists (re-register logic) to handle retries
+              const existsIndex = prev.players.findIndex(p => p.id === data.payload.id);
+              
+              if (existsIndex !== -1) {
+                  // Update existing
+                  console.log("Updating existing player:", data.payload);
+                  const updatedPlayers = [...prev.players];
+                  updatedPlayers[existsIndex] = data.payload;
+                  return {
+                      ...prev,
+                      players: updatedPlayers
+                  };
               }
 
-              console.log("Registering Player:", data.payload);
+              console.log("Registering New Player:", data.payload);
               return {
                   ...prev,
                   players: [...prev.players, data.payload],
@@ -323,7 +339,8 @@ const App: React.FC = () => {
           console.log("Sending Action:", type, payload);
           clientConnRef.current.send({ type, payload });
       } else {
-          console.warn("Cannot send action, connection not open");
+          console.warn("Cannot send action, connection not open. State:", clientConnRef.current?.open);
+          alert("Connection to host lost or not ready. Try again.");
       }
   };
 
@@ -384,11 +401,13 @@ const App: React.FC = () => {
     const template = INVESTIGATOR_TEMPLATES.find(t => t.id === selectedInvId)!;
     
     // Ensure Client IDs are unique
-    const uniqueId = gameState.networkMode === NetworkMode.Client 
-        ? `p_${Date.now()}_${Math.floor(Math.random()*1000)}` 
-        : `p_host_${Date.now()}`;
-    
-    setMyPlayerId(uniqueId);
+    let uniqueId = myPlayerId;
+    if (!uniqueId) {
+        uniqueId = gameState.networkMode === NetworkMode.Client 
+            ? `p_${Date.now()}_${Math.floor(Math.random()*1000)}` 
+            : `p_host_${Date.now()}`;
+        setMyPlayerId(uniqueId);
+    }
 
     const newPlayer: Player = {
       id: uniqueId,
@@ -424,9 +443,10 @@ const App: React.FC = () => {
         }));
     }
     
-    setLobbyName('');
-    setSelectedInvId(null);
-    setPreviewInvId(null);
+    // Don't clear selections immediately so they can re-send if needed
+    // setLobbyName('');
+    // setSelectedInvId(null);
+    // setPreviewInvId(null);
   };
 
   const toggleReady = () => {
@@ -1670,6 +1690,15 @@ const App: React.FC = () => {
                                           <div className="text-sm font-bold uppercase tracking-widest mb-1">Your Investigator</div>
                                           <div className="text-xl font-serif font-bold text-[#2b1d0e]">{myPlayer.name}</div>
                                           <div className="text-xs text-gray-600 italic">Waiting for mission start...</div>
+                                          {/* Resend button for stuck clients */}
+                                          {gameState.networkMode === NetworkMode.Client && (
+                                              <button 
+                                                onClick={joinGame}
+                                                className="mt-2 text-[10px] uppercase text-red-800 underline hover:text-red-600 cursor-pointer"
+                                              >
+                                                  Resend Registration
+                                              </button>
+                                          )}
                                       </div>
                                   )}
 
@@ -1816,173 +1845,192 @@ const App: React.FC = () => {
                  </div>
             </div>
         ) : gameState.phase === GamePhase.ItemDistribution ? (
-            <div className="flex-1 bg-[#1a0f0a] flex items-center justify-center p-8">
-                <div className="bg-[#e8dfc5] p-6 max-w-4xl w-full rounded shadow-2xl border-4 border-[#5c4033] relative">
-                    <h2 className="text-3xl font-serif text-[#2b1d0e] mb-4 text-center uppercase tracking-widest border-b-2 border-[#bfa68a] pb-2">
-                        Equipment Requisition
-                    </h2>
-                    {gameState.networkMode === NetworkMode.Client ? (
-                        <div className="text-center py-10">
-                            <p className="text-xl text-[#5c4033] animate-pulse">The Expedition Leader is distributing supplies...</p>
+             <div className="w-full h-full flex items-center justify-center bg-black/90 p-10 flex-col overflow-auto">
+                <h2 className="text-3xl text-mythos-gold font-serif mb-6 uppercase tracking-widest">Equip Investigators</h2>
+                <div className="flex gap-4 mb-8 overflow-x-auto max-w-full p-4">
+                    {distributionItems.map((item, i) => (
+                        <div 
+                            key={i}
+                            onClick={() => setSelectedDistItem(i)}
+                            className={`
+                                relative w-32 h-48 bg-[#e8dfc5] border-2 rounded p-2 cursor-pointer transition-transform hover:-translate-y-2
+                                ${selectedDistItem === i ? 'border-mythos-gold shadow-[0_0_15px_rgba(180,83,9,0.5)] scale-105' : 'border-[#5c4033]'}
+                            `}
+                        >
+                            <div className="text-xs font-bold text-center mb-1 text-black">{item}</div>
+                            <div className="text-[9px] italic text-center text-gray-700 leading-tight">{ITEMS[item]?.description}</div>
+                            {ITEMS[item]?.type === 'Weapon' && <div className="absolute bottom-2 right-2 text-xl">⚔️</div>}
                         </div>
+                    ))}
+                </div>
+                
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-4 w-full max-w-6xl">
+                    {gameState.players.map((p, idx) => (
+                        <div key={p.id} className="relative">
+                            <InvestigatorCard 
+                                player={p} 
+                                isActive={false} 
+                                compact 
+                            />
+                            {selectedDistItem !== null && (
+                                <button
+                                    onClick={() => assignItemToPlayer(idx)}
+                                    className="absolute inset-0 bg-black/50 hover:bg-black/20 flex items-center justify-center text-white font-bold uppercase tracking-widest opacity-0 hover:opacity-100 transition-opacity"
+                                >
+                                    Assign Item
+                                </button>
+                            )}
+                        </div>
+                    ))}
+                </div>
+
+                <div className="mt-8">
+                    {gameState.players.every(p => p.items.length > 0) || distributionItems.length === 0 ? (
+                        <button 
+                            onClick={generateMapAndIntro}
+                            className="px-8 py-3 bg-red-900 text-white font-serif uppercase tracking-widest font-bold text-xl hover:bg-red-800 shadow-lg border-2 border-red-950 animate-pulse"
+                        >
+                            Enter the Mansion
+                        </button>
                     ) : (
-                        <div className="flex gap-6">
-                            <div className="w-1/3 border-r border-[#bfa68a] pr-4">
-                                <h3 className="font-bold text-[#5c4033] mb-2 uppercase text-xs">Available Supplies</h3>
-                                <div className="space-y-2">
-                                    {distributionItems.map((item, idx) => (
-                                        <div 
-                                          key={idx}
-                                          onClick={() => setSelectedDistItem(idx)}
-                                          className={`p-2 border cursor-pointer ${selectedDistItem === idx ? 'bg-[#2b1d0e] text-[#e8dfc5] border-[#2b1d0e]' : 'bg-[#dacbb6] text-[#2b1d0e] border-[#c9b8a0] hover:bg-[#c9b8a0]'}`}
-                                        >
-                                            {item}
-                                        </div>
-                                    ))}
-                                    {distributionItems.length === 0 && <p className="text-sm italic text-gray-500">No items remaining.</p>}
-                                </div>
-                            </div>
-                            <div className="flex-1">
-                                <h3 className="font-bold text-[#5c4033] mb-2 uppercase text-xs">Assign to Investigator</h3>
-                                <div className="grid grid-cols-2 gap-3">
-                                    {gameState.players.map((p, idx) => (
-                                        <div key={p.id} className="bg-[#dacbb6] p-3 rounded border border-[#c9b8a0]">
-                                            <div className="font-bold text-[#2b1d0e]">{p.name}</div>
-                                            <div className="text-xs text-[#5c4033] mb-2">Items: {p.items.length}</div>
-                                            <div className="flex flex-wrap gap-1 mb-2">
-                                                {p.items.map((i, k) => <span key={k} className="text-[10px] bg-[#e8dfc5] px-1 border border-[#bfa68a]">{i}</span>)}
-                                            </div>
-                                            <button 
-                                              onClick={() => assignItemToPlayer(idx)}
-                                              disabled={selectedDistItem === null}
-                                              className="w-full py-1 bg-[#5c4033] text-[#e8dfc5] text-xs font-bold uppercase hover:bg-[#4a332a] disabled:opacity-50"
-                                            >
-                                                Assign
-                                            </button>
-                                        </div>
-                                    ))}
-                                </div>
-                            </div>
-                        </div>
-                    )}
-                    {gameState.networkMode === NetworkMode.Host && (
-                        <div className="mt-6 flex justify-center">
-                            <button 
-                              onClick={generateMapAndIntro}
-                              disabled={distributionItems.length > 0}
-                              className="px-8 py-3 bg-red-900 text-white font-serif uppercase tracking-widest font-bold hover:bg-red-800 disabled:opacity-50 shadow-lg border-2 border-red-950"
-                            >
-                                Enter the Mansion
-                            </button>
-                        </div>
+                        <p className="text-gray-500 italic">Distribute items to continue...</p>
                     )}
                 </div>
             </div>
-        ) : (
-            // Playing Phase
-            <div className="relative w-full h-full flex">
-               {/* Map Area */}
-               <div className="flex-1 relative bg-black">
-                   <MapBoard 
-                     tiles={gameState.tiles}
-                     tokens={gameState.tokens}
-                     players={gameState.players}
-                     monsters={gameState.monsters}
-                     onTokenClick={handleTokenClick}
-                     onTileClick={handleTileClick}
-                     onMonsterClick={handleMonsterClick}
-                     currentPlayerId={currentPlayer?.id}
-                   />
-               </div>
+          ) : (
+            /* Main Game View */
+            <div className="relative w-full h-full">
+               <MapBoard 
+                  tiles={gameState.tiles}
+                  tokens={gameState.tokens}
+                  players={gameState.players}
+                  monsters={gameState.monsters}
+                  onTileClick={handleTileClick}
+                  onTokenClick={handleTokenClick}
+                  onMonsterClick={handleMonsterClick}
+                  currentPlayerId={currentPlayer ? currentPlayer.id : ''}
+               />
 
-               {/* Right Sidebar: Logs & Chat */}
-               <div className="w-80 bg-[#1a0f0a] border-l border-[#3e2723] flex flex-col relative z-20">
-                   <div className="p-2 bg-[#2b1d0e] text-[#e8dfc5] text-center font-bold uppercase tracking-widest text-xs border-b border-[#3e2723]">
-                       Investigation Log
-                   </div>
-                   <div className="flex-1 overflow-y-auto p-4 space-y-3 font-serif text-sm">
-                       {gameState.log.map((msg, i) => (
-                           <p key={i} className="text-[#d4c5b0] border-b border-[#3e2723]/50 pb-2 last:border-0">{msg}</p>
-                       ))}
-                       <div ref={el => el?.scrollIntoView({ behavior: 'smooth' })} />
-                   </div>
-               </div>
-
-               {/* Bottom Bar: Cards */}
-               <div className="absolute bottom-0 left-0 right-80 h-48 bg-[#0f0a0a]/90 border-t border-[#3e2723] p-4 flex gap-4 overflow-x-auto z-30 backdrop-blur-sm">
-                    {gameState.players.map(p => (
-                        <div key={p.id} className="w-64 shrink-0">
-                            <InvestigatorCard 
-                                player={p} 
-                                isActive={currentPlayer?.id === p.id} 
-                                onUseItem={(item) => handleUseItem(item)}
-                            />
-                        </div>
-                    ))}
-               </div>
-               
-               {/* Overlays */}
+               {/* UI Overlays */}
                {gameState.phase === GamePhase.DiceRoll && gameState.activeDiceRoll && (
                    <DiceRoller 
                        attribute={gameState.activeDiceRoll.attribute}
                        amount={gameState.activeDiceRoll.count}
-                       target={gameState.activeDiceRoll.target}
                        playerClues={currentPlayer.clues}
                        playerColor={currentPlayer.color}
                        playerItems={currentPlayer.items}
                        usedItemAbilityRound={currentPlayer.usedItemAbilityRound}
-                       onComplete={gameState.activeDiceRoll.onSuccess}
+                       target={gameState.activeDiceRoll.target}
+                       onComplete={(rolls, cluesSpent) => {
+                           if (gameState.activeDiceRoll) {
+                               // Calculate successes
+                               let successes = rolls.filter(r => r === DiceFace.ElderSign).length;
+                               // Clues spent are already converted in DiceRoller visually to ElderSigns, 
+                               // but we need to track cost.
+                               // Actually DiceRoller returns final faces.
+                               const isSuccess = successes >= gameState.activeDiceRoll.target;
+                               // Consume clues from player state
+                               if (cluesSpent > 0) {
+                                   const newPlayers = gameState.players.map(p => 
+                                       p.id === currentPlayer.id ? { ...p, clues: p.clues - cluesSpent } : p
+                                   );
+                                   setGameState(prev => ({ ...prev, players: newPlayers }));
+                               }
+                               if (isSuccess) gameState.activeDiceRoll.onSuccess(rolls);
+                               else gameState.activeDiceRoll.onFail(rolls);
+                           }
+                       }}
                        onConsumeItem={handleConsumeItem}
                        onMarkItemUsed={handleMarkItemUsed}
-                       onCancel={() => {}} // Dice rolls mostly can't be cancelled once started
+                       onCancel={() => {}} // Can't cancel mostly
                    />
                )}
-
+               
                {gameState.phase === GamePhase.Puzzle && gameState.activePuzzle && (
                    <>
-                     {gameState.activePuzzle.type === PuzzleType.Sliding && (
-                         <SlidingPuzzle onComplete={gameState.activePuzzle.onSuccess} onFail={gameState.activePuzzle.onFail} />
-                     )}
-                     {gameState.activePuzzle.type === PuzzleType.Rune && (
-                         <RunePuzzle onComplete={gameState.activePuzzle.onSuccess} onFail={gameState.activePuzzle.onFail} />
-                     )}
-                     {gameState.activePuzzle.type === PuzzleType.Code && (
-                         <CodePuzzle onComplete={gameState.activePuzzle.onSuccess} onFail={gameState.activePuzzle.onFail} />
-                     )}
+                       {gameState.activePuzzle.type === PuzzleType.Sliding && (
+                           <SlidingPuzzle 
+                               onComplete={gameState.activePuzzle.onSuccess}
+                               onFail={gameState.activePuzzle.onFail}
+                           />
+                       )}
+                       {gameState.activePuzzle.type === PuzzleType.Rune && (
+                           <RunePuzzle
+                               onComplete={gameState.activePuzzle.onSuccess}
+                               onFail={gameState.activePuzzle.onFail}
+                           />
+                       )}
+                       {gameState.activePuzzle.type === PuzzleType.Code && (
+                           <CodePuzzle
+                               onComplete={gameState.activePuzzle.onSuccess}
+                               onFail={gameState.activePuzzle.onFail}
+                           />
+                       )}
                    </>
                )}
+               
+               {/* Player Hand / HUD */}
+               <div className="absolute bottom-4 left-4 z-50 flex flex-col gap-2">
+                   {/* Current Player Card */}
+                   {currentPlayer && (
+                       <div className="w-80 transform transition-all origin-bottom-left hover:scale-110">
+                           <InvestigatorCard 
+                               player={currentPlayer} 
+                               isActive={true} 
+                               onUseItem={handleUseItem}
+                           />
+                       </div>
+                   )}
+                   {/* Log */}
+                   <div className="w-80 max-h-48 bg-black/80 border border-gray-700 p-2 overflow-y-auto rounded text-xs font-mono text-green-400 shadow-lg pointer-events-auto">
+                       {gameState.log.slice().reverse().map((msg, i) => (
+                           <div key={i} className="mb-1 border-b border-gray-800 pb-1">{`> ${msg}`}</div>
+                       ))}
+                   </div>
+               </div>
 
-               {gameState.phase === GamePhase.Mythos && gameState.mythosEvent && (
-                   <div className="fixed inset-0 bg-black/95 z-50 flex items-center justify-center p-8 text-center cursor-pointer" onClick={endMythosPhase}>
-                        <div className="max-w-2xl">
-                            <h2 className="text-4xl text-mythos-blood font-serif font-bold mb-6 tracking-widest uppercase animate-pulse">Mythos Phase</h2>
-                            <p className="text-xl text-[#e8dfc5] font-serif leading-relaxed mb-8">{gameState.mythosEvent.text}</p>
-                            <p className="text-gray-500 text-sm uppercase tracking-widest blink">Click to Continue</p>
-                        </div>
+               {/* Other Players (Small) */}
+               <div className="absolute top-20 right-4 z-40 flex flex-col gap-2">
+                   {gameState.players.filter(p => p.id !== currentPlayer?.id).map(p => (
+                       <div key={p.id} className="w-48 opacity-80 hover:opacity-100 transition-opacity">
+                           <InvestigatorCard player={p} isActive={false} compact />
+                       </div>
+                   ))}
+               </div>
+               
+               {/* Mythos Event Overlay */}
+               {gameState.mythosEvent && (
+                   <div className="fixed top-1/4 left-1/2 -translate-x-1/2 bg-[#0f0a0a] border-2 border-red-900 p-6 max-w-xl w-full z-[60] shadow-[0_0_50px_rgba(255,0,0,0.3)] animate-in fade-in zoom-in duration-500">
+                       <h2 className="text-3xl text-red-600 font-serif mb-4 text-center uppercase tracking-widest border-b border-red-900/50 pb-2">Mythos Event</h2>
+                       <p className="text-xl text-[#d4c5b0] text-center font-serif leading-relaxed">{gameState.mythosEvent.text}</p>
+                       <div className="mt-6 flex justify-center">
+                           <button 
+                               onClick={endMythosPhase}
+                               className="px-6 py-2 bg-red-900/50 hover:bg-red-900 border border-red-800 text-red-100 rounded uppercase tracking-widest text-sm"
+                           >
+                               Continue
+                           </button>
+                       </div>
                    </div>
                )}
 
-               {(gameState.phase === GamePhase.GameOver || gameState.phase === GamePhase.Victory) && (
-                   <div className="fixed inset-0 bg-black z-[100] flex items-center justify-center text-center p-8">
-                        <div>
-                            <h1 className={`text-6xl font-serif font-bold mb-4 tracking-widest ${gameState.phase === GamePhase.Victory ? 'text-green-600' : 'text-red-900'}`}>
-                                {gameState.phase === GamePhase.Victory ? 'SURVIVED' : 'DEFEATED'}
-                            </h1>
-                            <p className="text-2xl text-gray-400 font-serif mb-8 max-w-xl mx-auto">
-                                {gameState.phase === GamePhase.Victory 
-                                    ? "You have escaped the mansion with your lives. The horrors within remain, but you are safe... for now."
-                                    : "The darkness claims you. Another group of souls lost to the echoing madness."
-                                }
-                            </p>
-                            <button onClick={resetGame} className="px-8 py-3 border-2 border-white text-white uppercase font-bold hover:bg-white hover:text-black transition-colors">
-                                Return to Lobby
-                            </button>
-                        </div>
+               {/* Victory / Game Over Overlays */}
+               {gameState.phase === GamePhase.Victory && (
+                   <div className="absolute inset-0 z-[70] bg-black/80 flex items-center justify-center flex-col animate-in fade-in duration-1000">
+                       <h1 className="text-6xl text-yellow-500 font-serif font-bold mb-4 uppercase tracking-widest drop-shadow-lg">Survived</h1>
+                       <p className="text-2xl text-gray-300 font-serif max-w-2xl text-center italic">"The horror has been sealed... for now."</p>
+                       <button onClick={resetGame} className="mt-8 px-8 py-3 bg-yellow-900/50 border border-yellow-700 text-yellow-100 uppercase font-bold hover:bg-yellow-900 transition-colors">Return to Menu</button>
                    </div>
                )}
-
+               {gameState.phase === GamePhase.GameOver && (
+                   <div className="absolute inset-0 z-[70] bg-black/90 flex items-center justify-center flex-col animate-in fade-in duration-1000">
+                       <h1 className="text-6xl text-red-700 font-serif font-bold mb-4 uppercase tracking-widest drop-shadow-[0_0_10px_rgba(255,0,0,0.5)]">Deceased</h1>
+                       <p className="text-xl text-gray-400 font-serif max-w-2xl text-center">Your investigation ends in tragedy.</p>
+                       <button onClick={resetGame} className="mt-8 px-8 py-3 bg-red-900/50 border border-red-700 text-red-100 uppercase font-bold hover:bg-red-900 transition-colors">Return to Menu</button>
+                   </div>
+               )}
             </div>
-        )}
+          )}
       </div>
     </div>
   );
