@@ -133,6 +133,7 @@ const App: React.FC = () => {
 
   const initHost = () => {
       if (peerRef.current) return; // Prevent double init
+      setLoading(true);
 
       // Generate a short code for display
       const displayCode = Math.random().toString(36).substring(2, 7).toUpperCase();
@@ -147,6 +148,7 @@ const App: React.FC = () => {
           console.log("Host Peer Open. ID:", id);
           setGameState(prev => ({ ...prev, roomCode: displayCode, networkMode: NetworkMode.Host }));
           setShowTitleScreen(false);
+          setLoading(false);
           addLog(`Room Created! Share Code: ${displayCode}`, false);
       });
 
@@ -175,6 +177,7 @@ const App: React.FC = () => {
 
       peer.on('error', (err: any) => {
           console.error("Peer error:", err);
+          setLoading(false);
           alert("Network Error: " + err.type);
       });
 
@@ -182,8 +185,19 @@ const App: React.FC = () => {
   };
 
   const initClient = () => {
-      if (peerRef.current) return; // Prevent double init
-      if (!joinCode) return;
+      // Force cleanup of previous attempts to allow retrying code
+      if (peerRef.current) {
+          console.log("Cleaning up previous peer instance...");
+          peerRef.current.destroy();
+          peerRef.current = null;
+      }
+      
+      if (!joinCode) {
+          alert("Please enter a Room Code.");
+          return;
+      }
+
+      setLoading(true);
       
       const peer = new Peer(); // Random ID for client
       const targetPeerId = PEER_PREFIX + joinCode.toUpperCase();
@@ -199,6 +213,7 @@ const App: React.FC = () => {
               console.log("Client connected to Host");
               setGameState(prev => ({ ...prev, roomCode: joinCode, networkMode: NetworkMode.Client }));
               setShowTitleScreen(false);
+              setLoading(false);
               addLog("Connected to Host!", false);
           });
 
@@ -211,6 +226,7 @@ const App: React.FC = () => {
 
           conn.on('error', (err: any) => {
              console.error("Client Connection Error:", err);
+             setLoading(false);
              alert("Connection Error: " + err);
           });
           
@@ -223,10 +239,16 @@ const App: React.FC = () => {
       
       peer.on('error', (err: any) => {
           console.error("Client Peer Error:", err);
+          setLoading(false);
           if (err.type === 'peer-unavailable') {
-              alert("Room not found. Check the code.");
+              alert("Room not found. Check the code and try again.");
           } else {
               alert("Network Error: " + err.type);
+          }
+          // Cleanup on error to allow retry
+          if (peerRef.current) {
+              peerRef.current.destroy();
+              peerRef.current = null;
           }
       });
       
@@ -1607,7 +1629,17 @@ const App: React.FC = () => {
   const activeTemplate = INVESTIGATOR_TEMPLATES.find(t => t.id === activeTemplateId) || INVESTIGATOR_TEMPLATES[0];
 
   return (
-    <div className="h-screen w-screen bg-black overflow-hidden flex flex-col text-gray-200 font-serif">
+    <div className="h-screen w-screen bg-black overflow-hidden flex flex-col text-gray-200 font-serif relative">
+      {/* Global Loading Overlay */}
+      {loading && (
+        <div className="absolute inset-0 bg-black/80 z-[200] flex items-center justify-center flex-col">
+          <div className="text-[#d4c5b0] font-serif text-3xl animate-pulse tracking-widest mb-4">
+             Consulting the Archives...
+          </div>
+          <div className="w-16 h-16 border-4 border-t-[#b45309] border-r-[#b45309] border-b-transparent border-l-transparent rounded-full animate-spin"></div>
+        </div>
+      )}
+
       {/* Title Screen Overlay */}
       {showTitleScreen && (
         <div className="absolute inset-0 z-[100] bg-black flex flex-col items-center justify-center p-8 text-center bg-[url('https://www.transparenttextures.com/patterns/dark-matter.png')]">
@@ -1987,7 +2019,6 @@ const App: React.FC = () => {
                     onTileClick={handleTileClick}
                     onMonsterClick={handleMonsterClick}
                   />
-                  {loading && <div className="absolute inset-0 bg-black/60 z-50 flex items-center justify-center"><div className="text-[#d4c5b0] font-serif text-2xl animate-pulse tracking-widest">Consulting the Archives...</div></div>}
                   {gameState.phase === GamePhase.Mythos && gameState.mythosEvent && (
                      <div className="absolute inset-0 z-40 bg-black/90 flex items-center justify-center p-8 backdrop-blur-md">
                         <div className="max-w-2xl w-full bg-[#0f0a0a] border-4 border-double border-[#5c1a1a] p-10 rounded-sm text-center shadow-[0_0_50px_rgba(139,0,0,0.3)] relative">
