@@ -57,9 +57,16 @@ const generateWithRetry = async (fn: () => Promise<any>, retries = 1, delay = 10
 
 const cleanJson = (text: string) => {
     if (!text) return "";
-    // Remove Markdown code blocks
     let clean = text.replace(/```json\s*/g, "").replace(/```\s*$/g, "");
-    // Remove potential leading/trailing whitespace
+    
+    // Attempt to extract the first JSON object if there's surrounding text
+    const firstBrace = clean.indexOf('{');
+    const lastBrace = clean.lastIndexOf('}');
+    
+    if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
+        clean = clean.substring(firstBrace, lastBrace + 1);
+    }
+    
     return clean.trim();
 };
 
@@ -183,7 +190,7 @@ export const generateIntro = async (difficulty: string, investigators: Player[])
       contents: prompt,
       config: {
         responseMimeType: "application/json",
-        maxOutputTokens: 2000, 
+        maxOutputTokens: 8192, 
         responseSchema: {
           type: Type.OBJECT,
           properties: {
