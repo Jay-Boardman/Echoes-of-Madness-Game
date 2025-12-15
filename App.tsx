@@ -45,6 +45,7 @@ const App: React.FC = () => {
   // Local Settings
   const [narrationEnabled, setNarrationEnabled] = useState(true);
   const [myPlayerId, setMyPlayerId] = useState<string | null>(null);
+  const [connectedClientsCount, setConnectedClientsCount] = useState(0);
 
   // Networking Refs
   const peerRef = useRef<any>(null);
@@ -157,6 +158,7 @@ const App: React.FC = () => {
       peer.on('connection', (conn: any) => {
           console.log("Host received connection from:", conn.peer);
           connectionsRef.current.push(conn);
+          setConnectedClientsCount(prev => prev + 1);
           
           conn.on('open', () => {
               console.log("Host connection fully opened with", conn.peer);
@@ -170,6 +172,12 @@ const App: React.FC = () => {
               if (handleNetworkDataRef.current) {
                   handleNetworkDataRef.current(data);
               }
+          });
+
+          conn.on('close', () => {
+              console.log("Connection closed");
+              setConnectedClientsCount(prev => Math.max(0, prev - 1));
+              connectionsRef.current = connectionsRef.current.filter(c => c !== conn);
           });
 
           conn.on('error', (err: any) => {
@@ -210,11 +218,8 @@ const App: React.FC = () => {
 
       peer.on('open', () => {
           console.log("Client Peer Open. ID:", peer.id);
-          // Explicit serialization: json
-          const conn = peer.connect(targetPeerId, { 
-              serialization: 'json',
-              reliable: true
-          });
+          // Standard connection (no explicit serialization to avoid mismatches)
+          const conn = peer.connect(targetPeerId);
           clientConnRef.current = conn;
           
           conn.on('open', () => {
@@ -268,7 +273,17 @@ const App: React.FC = () => {
   const handleNetworkData = (data: any) => {
       const currentState = gameStateRef.current;
       
-      // console.log("Handling Network Action:", data.type, "Current Mode:", currentState.networkMode);
+      // Auto-parse if string (fallback for serialization mismatches)
+      if (typeof data === 'string') {
+          try {
+              data = JSON.parse(data);
+          } catch (e) {
+              console.error("Failed to parse incoming network data:", e);
+              return;
+          }
+      }
+
+      console.log("Handling Network Action:", data.type);
 
       if (currentState.networkMode !== NetworkMode.Host) {
           console.warn("Ignoring action because not Host.");
@@ -393,6 +408,7 @@ const App: React.FC = () => {
     setLoading(false);
     setShowTitleScreen(true);
     setMyPlayerId(null);
+    setConnectedClientsCount(0);
   };
 
   const joinGame = () => {
@@ -1623,7 +1639,8 @@ const App: React.FC = () => {
       </div>
 
       <div className="flex-1 flex overflow-hidden relative">
-        {gameState.phase === GamePhase.Lobby && !showTitleScreen ? (
+        {gameState.phase === GamePhase.Lobby ? (
+            !showTitleScreen ? (
             <div className="w-full h-full flex items-center justify-center p-6 bg-[#0a0a0c] bg-[url('https://www.transparenttextures.com/patterns/dark-matter.png')]">
                  <div className="bg-[#e8dfc5] p-6 max-w-[95vw] w-full h-[90vh] rounded-sm shadow-2xl border-8 border-[#2b1d0e] relative flex flex-col overflow-hidden">
                       {/* Paper Texture Overlay */}
@@ -1650,7 +1667,12 @@ const App: React.FC = () => {
                                   <div className="text-sm font-bold text-black uppercase">Session ID</div>
                                   <div className="text-2xl text-red-900 font-mono tracking-widest">{gameState.roomCode}</div>
                                   {gameState.networkMode === NetworkMode.Client && <div className="text-xs text-blue-800 font-bold mt-1">Connected as Client</div>}
-                                  {gameState.networkMode === NetworkMode.Host && <div className="text-xs text-red-800 font-bold mt-1">Hosting Server</div>}
+                                  {gameState.networkMode === NetworkMode.Host && (
+                                      <div className="text-xs font-bold mt-1 flex items-center justify-end gap-1">
+                                          <span className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></span>
+                                          <span className="text-red-800">Hosting Server ({connectedClientsCount} Connected)</span>
+                                      </div>
+                                  )}
                               </div>
                           </header>
 
@@ -1844,193 +1866,209 @@ const App: React.FC = () => {
                       </div>
                  </div>
             </div>
+            ) : <div className="w-full h-full bg-[#0a0a0c]" /> 
         ) : gameState.phase === GamePhase.ItemDistribution ? (
-             <div className="w-full h-full flex items-center justify-center bg-black/90 p-10 flex-col overflow-auto">
-                <h2 className="text-3xl text-mythos-gold font-serif mb-6 uppercase tracking-widest">Equip Investigators</h2>
-                <div className="flex gap-4 mb-8 overflow-x-auto max-w-full p-4">
-                    {distributionItems.map((item, i) => (
-                        <div 
-                            key={i}
-                            onClick={() => setSelectedDistItem(i)}
-                            className={`
-                                relative w-32 h-48 bg-[#e8dfc5] border-2 rounded p-2 cursor-pointer transition-transform hover:-translate-y-2
-                                ${selectedDistItem === i ? 'border-mythos-gold shadow-[0_0_15px_rgba(180,83,9,0.5)] scale-105' : 'border-[#5c4033]'}
-                            `}
-                        >
-                            <div className="text-xs font-bold text-center mb-1 text-black">{item}</div>
-                            <div className="text-[9px] italic text-center text-gray-700 leading-tight">{ITEMS[item]?.description}</div>
-                            {ITEMS[item]?.type === 'Weapon' && <div className="absolute bottom-2 right-2 text-xl">⚔️</div>}
-                        </div>
-                    ))}
-                </div>
-                
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-4 w-full max-w-6xl">
-                    {gameState.players.map((p, idx) => (
-                        <div key={p.id} className="relative">
+            <div className="w-full h-full flex items-center justify-center p-6 bg-[#0a0a0c] relative">
+                 <div className="bg-[#e8dfc5] p-6 max-w-5xl w-full h-[80vh] rounded-sm shadow-2xl border-4 border-[#2b1d0e] flex flex-col relative">
+                     <h2 className="text-3xl font-serif font-bold text-[#2b1d0e] mb-4 text-center border-b border-[#2b1d0e] pb-2 uppercase tracking-widest">
+                        Equip Investigators
+                     </h2>
+                     <p className="text-center text-[#5c4033] mb-6 italic">
+                        {gameState.networkMode === NetworkMode.Client 
+                            ? "The Host is distributing starting equipment..." 
+                            : "Select an item, then select an investigator to assign it."}
+                     </p>
+
+                     <div className="flex-1 flex gap-6 min-h-0">
+                         {/* Items Column */}
+                         <div className="w-1/3 border-r border-[#bfa68a] pr-4 flex flex-col">
+                             <h3 className="font-bold text-[#2b1d0e] uppercase text-xs mb-2 tracking-widest">Available Items</h3>
+                             <div className="flex-1 overflow-y-auto space-y-2 pr-2">
+                                 {distributionItems.map((item, idx) => (
+                                     <div 
+                                        key={idx}
+                                        onClick={() => gameState.networkMode === NetworkMode.Host && setSelectedDistItem(idx)}
+                                        className={`p-3 border rounded cursor-pointer transition-all ${
+                                            selectedDistItem === idx 
+                                            ? 'bg-[#2b1d0e] text-[#e8dfc5] border-[#2b1d0e]' 
+                                            : 'bg-[#f3e9d2] text-[#2b1d0e] border-[#d1c2a5] hover:bg-[#e6d8b9]'
+                                        } ${gameState.networkMode === NetworkMode.Client ? 'opacity-70 pointer-events-none' : ''}`}
+                                     >
+                                         <div className="font-bold font-serif">{item}</div>
+                                         <div className="text-xs opacity-80">{ITEMS[item]?.type}</div>
+                                     </div>
+                                 ))}
+                                 {distributionItems.length === 0 && (
+                                     <div className="text-center text-gray-500 italic mt-10">No items remaining.</div>
+                                 )}
+                             </div>
+                         </div>
+
+                         {/* Players Column */}
+                         <div className="flex-1 flex flex-col">
+                             <h3 className="font-bold text-[#2b1d0e] uppercase text-xs mb-2 tracking-widest">Investigators</h3>
+                             <div className="grid grid-cols-2 gap-4 overflow-y-auto pr-2">
+                                 {gameState.players.map((p, idx) => (
+                                     <div 
+                                        key={p.id}
+                                        onClick={() => gameState.networkMode === NetworkMode.Host && assignItemToPlayer(idx)}
+                                        className={`cursor-pointer transition-transform hover:scale-[1.02] ${gameState.networkMode === NetworkMode.Client ? 'pointer-events-none' : ''}`}
+                                     >
+                                         <InvestigatorCard player={p} isActive={false} compact={true} />
+                                     </div>
+                                 ))}
+                             </div>
+                         </div>
+                     </div>
+
+                     {gameState.networkMode === NetworkMode.Host && (
+                         <div className="mt-6 flex justify-end">
+                             <button 
+                               onClick={generateMapAndIntro}
+                               className="px-8 py-3 bg-red-900 text-white font-serif uppercase tracking-widest font-bold shadow-lg hover:bg-red-800 border-2 border-red-950"
+                             >
+                                Start Game
+                             </button>
+                         </div>
+                     )}
+                 </div>
+            </div>
+        ) : (
+            // MAIN GAME PLAYING AREA
+            <div className="relative w-full h-full bg-[#0a0a0c]">
+                 <MapBoard 
+                    tiles={gameState.tiles}
+                    tokens={gameState.tokens}
+                    players={gameState.players}
+                    monsters={gameState.monsters}
+                    currentPlayerId={currentPlayer?.id || ''}
+                    onTileClick={(t) => handleTileClick(t)}
+                    onTokenClick={(t) => handleTokenClick(t)}
+                    onMonsterClick={(m) => handleMonsterClick(m)}
+                 />
+
+                 {/* HUD / Current Player Card */}
+                 {currentPlayer && (
+                     <div className="absolute bottom-4 left-4 z-50 w-80 pointer-events-none">
+                         <div className="pointer-events-auto transform transition-transform hover:scale-105 origin-bottom-left">
                             <InvestigatorCard 
-                                player={p} 
-                                isActive={false} 
-                                compact 
+                                player={currentPlayer} 
+                                isActive={true} 
+                                onUseItem={(item) => handleUseItem(item)}
                             />
-                            {selectedDistItem !== null && (
-                                <button
-                                    onClick={() => assignItemToPlayer(idx)}
-                                    className="absolute inset-0 bg-black/50 hover:bg-black/20 flex items-center justify-center text-white font-bold uppercase tracking-widest opacity-0 hover:opacity-100 transition-opacity"
-                                >
-                                    Assign Item
-                                </button>
-                            )}
-                        </div>
-                    ))}
-                </div>
+                         </div>
+                     </div>
+                 )}
 
-                <div className="mt-8">
-                    {gameState.players.every(p => p.items.length > 0) || distributionItems.length === 0 ? (
-                        <button 
-                            onClick={generateMapAndIntro}
-                            className="px-8 py-3 bg-red-900 text-white font-serif uppercase tracking-widest font-bold text-xl hover:bg-red-800 shadow-lg border-2 border-red-950 animate-pulse"
-                        >
-                            Enter the Mansion
-                        </button>
-                    ) : (
-                        <p className="text-gray-500 italic">Distribute items to continue...</p>
-                    )}
+                 {/* LOG */}
+                 <div className="absolute top-20 right-4 w-72 h-48 pointer-events-none flex flex-col justify-end">
+                    <div className="bg-black/60 p-2 rounded text-xs text-gray-300 font-serif space-y-1 overflow-hidden flex flex-col justify-end h-full shadow-lg border border-gray-800/50 backdrop-blur-sm">
+                        {gameState.log.slice(-6).map((msg, i) => (
+                            <div key={i} className="animate-fade-in">{msg}</div>
+                        ))}
+                    </div>
+                 </div>
+            </div>
+        )}
+
+        {/* OVERLAYS */}
+        
+        {/* Dice Roller Overlay */}
+        {gameState.phase === GamePhase.DiceRoll && gameState.activeDiceRoll && currentPlayer && (
+             <DiceRoller 
+                attribute={gameState.activeDiceRoll.attribute}
+                amount={gameState.activeDiceRoll.count}
+                target={gameState.activeDiceRoll.target}
+                playerClues={currentPlayer.clues}
+                playerColor={currentPlayer.color}
+                playerItems={currentPlayer.items}
+                usedItemAbilityRound={currentPlayer.usedItemAbilityRound}
+                onComplete={(faces, cluesSpent) => {
+                    const successes = faces.filter(f => f === DiceFace.ElderSign).length;
+                    if (successes >= gameState.activeDiceRoll!.target) {
+                        gameState.activeDiceRoll!.onSuccess(faces);
+                    } else {
+                        gameState.activeDiceRoll!.onFail(faces);
+                    }
+                    if (cluesSpent > 0) {
+                        setGameState(prev => ({
+                            ...prev,
+                            players: prev.players.map(p => p.id === currentPlayer.id ? { ...p, clues: p.clues - cluesSpent } : p)
+                        }));
+                    }
+                }}
+                onConsumeItem={handleConsumeItem}
+                onMarkItemUsed={handleMarkItemUsed}
+                onCancel={() => {}} // Can't cancel active rolls usually
+             />
+        )}
+
+        {/* Puzzle Overlay */}
+        {gameState.phase === GamePhase.Puzzle && gameState.activePuzzle && (
+            <>
+                {gameState.activePuzzle.type === PuzzleType.Sliding && (
+                    <SlidingPuzzle 
+                        onComplete={gameState.activePuzzle.onSuccess} 
+                        onFail={gameState.activePuzzle.onFail} 
+                    />
+                )}
+                {gameState.activePuzzle.type === PuzzleType.Rune && (
+                    <RunePuzzle 
+                        onComplete={gameState.activePuzzle.onSuccess} 
+                        onFail={gameState.activePuzzle.onFail} 
+                    />
+                )}
+                {gameState.activePuzzle.type === PuzzleType.Code && (
+                    <CodePuzzle 
+                        onComplete={gameState.activePuzzle.onSuccess} 
+                        onFail={gameState.activePuzzle.onFail} 
+                    />
+                )}
+            </>
+        )}
+
+        {/* Mythos/Event Overlay */}
+        {gameState.phase === GamePhase.Mythos && gameState.mythosEvent && (
+            <div className="fixed inset-0 z-[60] bg-black/90 flex items-center justify-center p-8">
+                <div className="bg-[#2a1b15] border-4 border-red-900 p-8 max-w-2xl text-center shadow-[0_0_50px_rgba(255,0,0,0.2)] rounded-sm relative overflow-hidden">
+                    <div className="absolute inset-0 bg-[url('https://www.transparenttextures.com/patterns/dark-matter.png')] opacity-20 pointer-events-none"></div>
+                    <h2 className="text-4xl text-red-600 font-serif font-bold mb-6 tracking-widest uppercase drop-shadow-md">Mythos Phase</h2>
+                    <p className="text-xl text-[#d4c5b0] mb-8 font-serif leading-relaxed">{gameState.mythosEvent.text}</p>
+                    <button 
+                        onClick={endMythosPhase}
+                        className="px-8 py-3 bg-red-900 hover:bg-red-800 text-white font-serif uppercase tracking-widest border border-red-950 shadow-lg"
+                    >
+                        Continue
+                    </button>
                 </div>
             </div>
-          ) : (
-            /* Main Game View */
-            <div className="relative w-full h-full">
-               <MapBoard 
-                  tiles={gameState.tiles}
-                  tokens={gameState.tokens}
-                  players={gameState.players}
-                  monsters={gameState.monsters}
-                  onTileClick={handleTileClick}
-                  onTokenClick={handleTokenClick}
-                  onMonsterClick={handleMonsterClick}
-                  currentPlayerId={currentPlayer ? currentPlayer.id : ''}
-               />
+        )}
 
-               {/* UI Overlays */}
-               {gameState.phase === GamePhase.DiceRoll && gameState.activeDiceRoll && (
-                   <DiceRoller 
-                       attribute={gameState.activeDiceRoll.attribute}
-                       amount={gameState.activeDiceRoll.count}
-                       playerClues={currentPlayer.clues}
-                       playerColor={currentPlayer.color}
-                       playerItems={currentPlayer.items}
-                       usedItemAbilityRound={currentPlayer.usedItemAbilityRound}
-                       target={gameState.activeDiceRoll.target}
-                       onComplete={(rolls, cluesSpent) => {
-                           if (gameState.activeDiceRoll) {
-                               // Calculate successes
-                               let successes = rolls.filter(r => r === DiceFace.ElderSign).length;
-                               // Clues spent are already converted in DiceRoller visually to ElderSigns, 
-                               // but we need to track cost.
-                               // Actually DiceRoller returns final faces.
-                               const isSuccess = successes >= gameState.activeDiceRoll.target;
-                               // Consume clues from player state
-                               if (cluesSpent > 0) {
-                                   const newPlayers = gameState.players.map(p => 
-                                       p.id === currentPlayer.id ? { ...p, clues: p.clues - cluesSpent } : p
-                                   );
-                                   setGameState(prev => ({ ...prev, players: newPlayers }));
-                               }
-                               if (isSuccess) gameState.activeDiceRoll.onSuccess(rolls);
-                               else gameState.activeDiceRoll.onFail(rolls);
-                           }
-                       }}
-                       onConsumeItem={handleConsumeItem}
-                       onMarkItemUsed={handleMarkItemUsed}
-                       onCancel={() => {}} // Can't cancel mostly
-                   />
-               )}
-               
-               {gameState.phase === GamePhase.Puzzle && gameState.activePuzzle && (
-                   <>
-                       {gameState.activePuzzle.type === PuzzleType.Sliding && (
-                           <SlidingPuzzle 
-                               onComplete={gameState.activePuzzle.onSuccess}
-                               onFail={gameState.activePuzzle.onFail}
-                           />
-                       )}
-                       {gameState.activePuzzle.type === PuzzleType.Rune && (
-                           <RunePuzzle
-                               onComplete={gameState.activePuzzle.onSuccess}
-                               onFail={gameState.activePuzzle.onFail}
-                           />
-                       )}
-                       {gameState.activePuzzle.type === PuzzleType.Code && (
-                           <CodePuzzle
-                               onComplete={gameState.activePuzzle.onSuccess}
-                               onFail={gameState.activePuzzle.onFail}
-                           />
-                       )}
-                   </>
-               )}
-               
-               {/* Player Hand / HUD */}
-               <div className="absolute bottom-4 left-4 z-50 flex flex-col gap-2">
-                   {/* Current Player Card */}
-                   {currentPlayer && (
-                       <div className="w-80 transform transition-all origin-bottom-left hover:scale-110">
-                           <InvestigatorCard 
-                               player={currentPlayer} 
-                               isActive={true} 
-                               onUseItem={handleUseItem}
-                           />
-                       </div>
-                   )}
-                   {/* Log */}
-                   <div className="w-80 max-h-48 bg-black/80 border border-gray-700 p-2 overflow-y-auto rounded text-xs font-mono text-green-400 shadow-lg pointer-events-auto">
-                       {gameState.log.slice().reverse().map((msg, i) => (
-                           <div key={i} className="mb-1 border-b border-gray-800 pb-1">{`> ${msg}`}</div>
-                       ))}
-                   </div>
-               </div>
-
-               {/* Other Players (Small) */}
-               <div className="absolute top-20 right-4 z-40 flex flex-col gap-2">
-                   {gameState.players.filter(p => p.id !== currentPlayer?.id).map(p => (
-                       <div key={p.id} className="w-48 opacity-80 hover:opacity-100 transition-opacity">
-                           <InvestigatorCard player={p} isActive={false} compact />
-                       </div>
-                   ))}
-               </div>
-               
-               {/* Mythos Event Overlay */}
-               {gameState.mythosEvent && (
-                   <div className="fixed top-1/4 left-1/2 -translate-x-1/2 bg-[#0f0a0a] border-2 border-red-900 p-6 max-w-xl w-full z-[60] shadow-[0_0_50px_rgba(255,0,0,0.3)] animate-in fade-in zoom-in duration-500">
-                       <h2 className="text-3xl text-red-600 font-serif mb-4 text-center uppercase tracking-widest border-b border-red-900/50 pb-2">Mythos Event</h2>
-                       <p className="text-xl text-[#d4c5b0] text-center font-serif leading-relaxed">{gameState.mythosEvent.text}</p>
-                       <div className="mt-6 flex justify-center">
-                           <button 
-                               onClick={endMythosPhase}
-                               className="px-6 py-2 bg-red-900/50 hover:bg-red-900 border border-red-800 text-red-100 rounded uppercase tracking-widest text-sm"
-                           >
-                               Continue
-                           </button>
-                       </div>
-                   </div>
-               )}
-
-               {/* Victory / Game Over Overlays */}
-               {gameState.phase === GamePhase.Victory && (
-                   <div className="absolute inset-0 z-[70] bg-black/80 flex items-center justify-center flex-col animate-in fade-in duration-1000">
-                       <h1 className="text-6xl text-yellow-500 font-serif font-bold mb-4 uppercase tracking-widest drop-shadow-lg">Survived</h1>
-                       <p className="text-2xl text-gray-300 font-serif max-w-2xl text-center italic">"The horror has been sealed... for now."</p>
-                       <button onClick={resetGame} className="mt-8 px-8 py-3 bg-yellow-900/50 border border-yellow-700 text-yellow-100 uppercase font-bold hover:bg-yellow-900 transition-colors">Return to Menu</button>
-                   </div>
-               )}
-               {gameState.phase === GamePhase.GameOver && (
-                   <div className="absolute inset-0 z-[70] bg-black/90 flex items-center justify-center flex-col animate-in fade-in duration-1000">
-                       <h1 className="text-6xl text-red-700 font-serif font-bold mb-4 uppercase tracking-widest drop-shadow-[0_0_10px_rgba(255,0,0,0.5)]">Deceased</h1>
-                       <p className="text-xl text-gray-400 font-serif max-w-2xl text-center">Your investigation ends in tragedy.</p>
-                       <button onClick={resetGame} className="mt-8 px-8 py-3 bg-red-900/50 border border-red-700 text-red-100 uppercase font-bold hover:bg-red-900 transition-colors">Return to Menu</button>
-                   </div>
-               )}
+        {/* Game Over / Victory Overlay */}
+        {(gameState.phase === GamePhase.GameOver || gameState.phase === GamePhase.Victory) && (
+            <div className="fixed inset-0 z-[100] bg-black flex items-center justify-center p-8">
+                <div className={`p-12 max-w-3xl text-center border-4 shadow-2xl ${gameState.phase === GamePhase.Victory ? 'bg-[#e8dfc5] border-yellow-600' : 'bg-[#1a0f0a] border-red-900'}`}>
+                    <h1 className={`text-6xl font-serif font-bold mb-6 tracking-widest ${gameState.phase === GamePhase.Victory ? 'text-[#2b1d0e]' : 'text-red-700'}`}>
+                        {gameState.phase === GamePhase.Victory ? "SURVIVED" : "DEFEATED"}
+                    </h1>
+                    <p className={`text-2xl font-serif mb-12 ${gameState.phase === GamePhase.Victory ? 'text-[#5c4033]' : 'text-gray-400'}`}>
+                        {gameState.phase === GamePhase.Victory 
+                            ? "You have escaped the manor with your lives and your sanity... mostly." 
+                            : "The manor claims another soul. Your investigation ends here."}
+                    </p>
+                    <button 
+                        onClick={resetGame}
+                        className={`px-10 py-4 text-xl font-bold uppercase tracking-widest border-2 transition-all
+                            ${gameState.phase === GamePhase.Victory 
+                                ? 'bg-[#2b1d0e] text-[#e8dfc5] hover:bg-[#3e2b18]' 
+                                : 'bg-red-900 text-white hover:bg-red-800'}`}
+                    >
+                        Return to Title
+                    </button>
+                </div>
             </div>
-          )}
+        )}
+
       </div>
     </div>
   );
