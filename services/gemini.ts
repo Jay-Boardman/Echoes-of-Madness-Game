@@ -2,9 +2,26 @@
 import { GoogleGenAI, Type } from "@google/genai";
 import { Player, Attribute } from "../types";
 
-// Initialize AI only if key exists, otherwise default to offline mode
-// Safely check for process.env to prevent crashes in browser environments
-const apiKey = (typeof process !== 'undefined' && process.env) ? process.env.API_KEY : undefined;
+// Safe API Key retrieval for Browser/ESM environments
+const getApiKey = () => {
+  try {
+    // Check for standard process.env (Node/Webpack/Vite with define)
+    if (typeof process !== 'undefined' && process.env && process.env.API_KEY) {
+      return process.env.API_KEY;
+    }
+    // Check for Vite's import.meta.env
+    // @ts-ignore
+    if (typeof import.meta !== 'undefined' && import.meta.env && import.meta.env.VITE_API_KEY) {
+      // @ts-ignore
+      return import.meta.env.VITE_API_KEY;
+    }
+  } catch (e) {
+    console.warn("Could not read API Key environment variables", e);
+  }
+  return undefined;
+};
+
+const apiKey = getApiKey();
 const ai = apiKey ? new GoogleGenAI({ apiKey }) : null;
 
 const MODEL = 'gemini-2.5-flash';
@@ -36,6 +53,14 @@ const generateWithRetry = async (fn: () => Promise<any>, retries = 1, delay = 10
         }
         throw error;
     }
+};
+
+const cleanJson = (text: string) => {
+    if (!text) return "";
+    // Remove Markdown code blocks
+    let clean = text.replace(/```json\s*/g, "").replace(/```\s*$/g, "");
+    // Remove potential leading/trailing whitespace
+    return clean.trim();
 };
 
 // --- Fallback Generators ---
@@ -158,7 +183,7 @@ export const generateIntro = async (difficulty: string, investigators: Player[])
       contents: prompt,
       config: {
         responseMimeType: "application/json",
-        maxOutputTokens: 1000, 
+        maxOutputTokens: 2000, 
         responseSchema: {
           type: Type.OBJECT,
           properties: {
@@ -172,8 +197,9 @@ export const generateIntro = async (difficulty: string, investigators: Player[])
     
     const text = response.text;
     if (!text) throw new Error("No text");
-    return JSON.parse(text);
+    return JSON.parse(cleanJson(text));
   } catch (error) {
+    console.error("API Error (Intro), using fallback:", error);
     return getFallbackIntro();
   }
 };
@@ -224,7 +250,7 @@ export const generateRoomDiscovery = async (direction: string, context: string, 
       contents: prompt,
       config: {
         responseMimeType: "application/json",
-        maxOutputTokens: 600,
+        maxOutputTokens: 2000,
         responseSchema: {
           type: Type.OBJECT,
           properties: {
@@ -245,8 +271,9 @@ export const generateRoomDiscovery = async (direction: string, context: string, 
         }
       }
     }));
-    return JSON.parse(response.text);
+    return JSON.parse(cleanJson(response.text || ""));
   } catch (error) {
+    console.error("API Error (Room), using fallback:", error);
     return getFallbackRoom(direction, fromRoomType, existingTypes);
   }
 };
@@ -285,6 +312,7 @@ export const generateInvestigationOutcome = async (
     }));
     return response.text;
   } catch (error) {
+    console.error("API Error (Investigate), using fallback:", error);
     return success ? `You found ${foundObject || 'something'}.` : "You found nothing.";
   }
 };
@@ -316,7 +344,7 @@ export const generateMythosEvent = async (context: string, threatLevel: number) 
       contents: prompt,
       config: {
         responseMimeType: "application/json",
-        maxOutputTokens: 500,
+        maxOutputTokens: 1000,
         responseSchema: {
           type: Type.OBJECT,
           properties: {
@@ -327,8 +355,9 @@ export const generateMythosEvent = async (context: string, threatLevel: number) 
         }
       }
     }));
-    return JSON.parse(response.text);
+    return JSON.parse(cleanJson(response.text || ""));
   } catch (error) {
+    console.error("API Error (Mythos), using fallback:", error);
     return getFallbackMythos(threatLevel);
   }
 };
@@ -354,6 +383,7 @@ export const generateInsanityCondition = async (context: string) => {
         }));
         return response.text;
     } catch (error) {
+        console.error("API Error (Insanity), using fallback:", error);
         return getFallbackInsanity();
     }
 };
