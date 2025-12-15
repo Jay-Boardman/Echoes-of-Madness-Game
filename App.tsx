@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect, useRef } from 'react';
 import { 
   GameState, GamePhase, Player, Investigator, Attribute, 
@@ -34,7 +33,7 @@ const App: React.FC = () => {
     currentPlayerIndex: 0,
     tiles: [],
     tokens: [],
-    itemDeck: [], // Stores unique items remaining in the pool
+    itemDeck: [], // Stores unique items available to be found
     log: [],
     storyContext: '',
     evidenceCollected: 0,
@@ -45,6 +44,7 @@ const App: React.FC = () => {
 
   // Local Settings
   const [narrationEnabled, setNarrationEnabled] = useState(true);
+  const [myPlayerId, setMyPlayerId] = useState<string | null>(null);
 
   // Networking Refs
   const peerRef = useRef<any>(null);
@@ -283,6 +283,14 @@ const App: React.FC = () => {
           });
           speak(`${data.payload.name} has joined the roster.`);
       }
+      else if (data.type === 'ACTION_PLAYER_READY') {
+          setGameState(prev => ({
+              ...prev,
+              players: prev.players.map(p => 
+                  p.id === data.payload.playerId ? { ...p, isReady: data.payload.isReady } : p
+              )
+          }));
+      }
       else if (data.type === 'ACTION_TILE_CLICK') {
           const tile = currentState.tiles.find(t => t.id === data.payload.tileId);
           if(tile) handleTileClick(tile, true);
@@ -366,6 +374,7 @@ const App: React.FC = () => {
     setSelectedDistItem(null);
     setLoading(false);
     setShowTitleScreen(true);
+    setMyPlayerId(null);
   };
 
   const joinGame = () => {
@@ -377,6 +386,8 @@ const App: React.FC = () => {
     const uniqueId = gameState.networkMode === NetworkMode.Client 
         ? `p_${Date.now()}_${Math.floor(Math.random()*1000)}` 
         : `p_host_${Date.now()}`;
+    
+    setMyPlayerId(uniqueId);
 
     const newPlayer: Player = {
       id: uniqueId,
@@ -395,7 +406,8 @@ const App: React.FC = () => {
       actionsRemaining: 2,
       isWounded: false,
       isInsane: false,
-      usedItemAbilityRound: false
+      usedItemAbilityRound: false,
+      isReady: gameState.networkMode !== NetworkMode.Client // Host is always ready
     };
 
     if (gameState.networkMode === NetworkMode.Client) {
@@ -414,6 +426,16 @@ const App: React.FC = () => {
     setLobbyName('');
     setSelectedInvId(null);
     setPreviewInvId(null);
+  };
+
+  const toggleReady = () => {
+      if (!myPlayerId) return;
+      const me = gameState.players.find(p => p.id === myPlayerId);
+      if (!me) return;
+
+      if (gameState.networkMode === NetworkMode.Client) {
+          sendAction('ACTION_PLAYER_READY', { playerId: myPlayerId, isReady: !me.isReady });
+      }
   };
 
   // STEP 1: PREPARE ITEMS
@@ -797,6 +819,13 @@ const App: React.FC = () => {
          }));
          setLoading(false);
       }
+  };
+
+  const updatePlayerAction = (playerId: string, delta: number) => {
+    setGameState(prev => ({
+        ...prev,
+        players: prev.players.map(p => p.id === playerId ? { ...p, actionsRemaining: p.actionsRemaining + delta } : p)
+    }));
   };
 
   // --- Interaction Logic ---
@@ -1274,235 +1303,6 @@ const App: React.FC = () => {
      setLoading(false);
   };
 
-  const updatePlayerAction = (pid: string, delta: number) => {
-    setGameState(prev => ({
-      ...prev,
-      players: prev.players.map(p => p.id === pid ? { ...p, actionsRemaining: p.actionsRemaining + delta } : p)
-    }));
-  };
-
-  // --- Mythos Phase Logic ---
-  
-  const moveMonsters = (currentGameState: GameState): { monsters: Monster[], logs: string[] } => {
-      const logs: string[] = [];
-      const { tiles, tokens, players } = currentGameState;
-
-      const canMove = (t1: Tile, t2: Tile): boolean => {
-          if (t1.roomId === t2.roomId) return true; 
-          
-          let dir = '';
-          if (t2.y < t1.y) dir = 'North';
-          if (t2.y > t1.y) dir = 'South';
-          if (t2.x > t1.x) dir = 'East';
-          if (t2.x < t1.x) dir = 'West';
-
-          const doorAtT1 = tokens.find(t => 
-              t.type === TokenType.Explore && t.resolved && t.x === t1.x && t.y === t1.y && t.direction === dir
-          );
-          
-          const oppDir = dir === 'North' ? 'South' : dir === 'South' ? 'North' : dir === 'East' ? 'West' : 'East';
-          const doorAtT2 = tokens.find(t => 
-              t.type === TokenType.Explore && t.resolved && t.x === t2.x && t.y === t2.y && t.direction === oppDir
-          );
-
-          return !!(doorAtT1 || doorAtT2);
-      };
-
-      const newMonsters = currentGameState.monsters.map(monster => {
-          const queue = [{ x: monster.x, y: monster.y, path: [] as {x:number, y:number}[] }];
-          const visited = new Set<string>();
-          visited.add(`${monster.x},${monster.y}`);
-          
-          let targetPath: {x:number, y:number}[] | null = null;
-
-          while(queue.length > 0) {
-              const { x, y, path } = queue.shift()!;
-              
-              if (players.some(p => p.x === x && p.y === y)) {
-                  targetPath = path;
-                  break;
-              }
-
-              const currentTile = tiles.find(t => t.x === x && t.y === y);
-              if (!currentTile) continue;
-
-              const neighbors = [
-                  { nx: x, ny: y - 1 }, { nx: x, ny: y + 1 },
-                  { nx: x + 1, ny: y }, { nx: x - 1, ny: y }
-              ];
-
-              for(const {nx, ny} of neighbors) {
-                  const id = `${nx},${ny}`;
-                  if (visited.has(id)) continue;
-                  
-                  const nextTile = tiles.find(t => t.x === nx && t.y === ny);
-                  if (nextTile && canMove(currentTile, nextTile)) {
-                      visited.add(id);
-                      queue.push({ x: nx, y: ny, path: [...path, {x: nx, y: ny}] });
-                  }
-              }
-          }
-
-          if (targetPath && targetPath.length > 0) {
-               const speed = monster.tier === 3 ? 3 : 2; 
-               const steps = Math.min(speed, targetPath.length);
-               const destIndex = steps - 1;
-               const dest = targetPath[destIndex];
-               return { ...monster, x: dest.x, y: dest.y };
-          }
-
-          return monster; 
-      });
-
-      return { monsters: newMonsters, logs };
-  };
-
-  const startMythosPhase = async () => {
-    setLoading(true);
-    const currentState = gameStateRef.current;
-    const round = currentState.round + 1;
-    addLog(`Round ${round} begins.`, false);
-    
-    const result = moveMonsters(currentState);
-    let movedMonsters = result.monsters;
-    setGameState(prev => ({ ...prev, monsters: movedMonsters }));
-
-    for (const monster of movedMonsters) {
-       const victim = currentState.players.find(p => p.x === monster.x && p.y === monster.y);
-       if (victim) {
-          const attackNarrative = `${monster.name} attacks ${victim.name}!`;
-          addLog(attackNarrative, true);
-          setGameState(prev => ({
-             ...prev,
-             round: round,
-             phase: GamePhase.Mythos, 
-             mythosEvent: { text: attackNarrative, type: 'TEST' },
-          }));
-          
-          setTimeout(() => {
-             setGameState(prev => ({
-                 ...prev,
-                 phase: GamePhase.DiceRoll,
-                 activeDiceRoll: {
-                     playerId: victim.id,
-                     attribute: Attribute.Agility,
-                     count: victim.attributes[Attribute.Agility],
-                     target: monster.tier === 3 ? 3 : 2, 
-                     description: `Dodge the ${monster.name}!`,
-                     onSuccess: () => {
-                         addLog(`${victim.name} evades the attack!`, true);
-                         setGameState(ps => ({ 
-                           ...ps, 
-                           phase: GamePhase.Mythos, 
-                           activeDiceRoll: undefined, 
-                           mythosEvent: { text: ps.mythosEvent?.text || "The attack ends.", type: 'FLAVOR' }
-                         }));
-                     },
-                     onFail: () => {
-                         const damage = monster.damage;
-                         const horror = monster.horror;
-                         addLog(`${victim.name} is hit! Took ${damage} Damage and ${horror} Horror.`, true);
-                         setGameState(ps => ({ 
-                             ...ps, 
-                             phase: GamePhase.Mythos, 
-                             activeDiceRoll: undefined, 
-                             mythosEvent: { text: ps.mythosEvent?.text || "The attack lands.", type: 'FLAVOR' } 
-                         }));
-                         applyDamage(victim.id, damage, horror);
-                     }
-                 }
-             }));
-          }, 2000);
-          
-          setLoading(false);
-          return;
-       }
-    }
-    
-    const tileBonus = Math.floor(currentState.tiles.length / 3);
-    let threatLevel = Math.min(round + tileBonus, 10);
-    if (currentState.isEscapeOpen) threatLevel = 10; 
-
-    const event = await GeminiService.generateMythosEvent(currentState.storyContext, threatLevel);
-
-    setGameState(prev => ({
-      ...prev,
-      round: round,
-      phase: GamePhase.Mythos,
-      mythosEvent: { text: event.narrative, type: event.type },
-      log: [...prev.log, `MYTHOS: ${event.narrative}`],
-      storyContext: prev.storyContext + ` [Mythos: ${event.narrative}]`
-    }));
-    speak(event.narrative);
-
-    if (event.type === 'SPAWN') {
-       const maxMonstersPerInvestigator = currentState.difficulty === 'Easy' ? 1 : currentState.difficulty === 'Normal' ? 2 : 3;
-       const maxMonsters = (maxMonstersPerInvestigator * currentState.players.length);
-       const currentLesserMonsters = currentState.monsters.filter(m => m.tier < 3).length;
-
-       if (currentLesserMonsters < maxMonsters && currentState.monsters.length < 10) {
-           const candidates = MONSTER_TEMPLATES.filter(m => m.tier <= (threatLevel > 8 ? 3 : (threatLevel > 5 ? 2 : 1)));
-           const template = candidates[Math.floor(Math.random() * candidates.length)];
-           const tile = currentState.tiles[Math.floor(Math.random() * currentState.tiles.length)];
-           const newMonster: Monster = {
-               id: `mon_${Date.now()}`,
-               templateId: template.id,
-               name: template.name,
-               tier: template.tier as any,
-               health: template.health,
-               maxHealth: template.health,
-               damage: template.damage,
-               horror: template.horror,
-               x: tile.x,
-               y: tile.y,
-               image: template.image
-           };
-           setGameState(prev => ({ ...prev, monsters: [...prev.monsters, newMonster] }));
-           addLog(`${template.name} spawned!`, false);
-       } else {
-           addLog("The shadows stir, but nothing emerges... yet.", false);
-       }
-    }
-    
-    if (event.type === 'TEST') {
-        const attrStr = event.param || 'Will';
-        const attr = Object.values(Attribute).find(a => a === attrStr) || Attribute.Will;
-        const victim = currentState.players[0]; 
-        
-        setTimeout(() => {
-           setGameState(prev => ({
-               ...prev,
-               phase: GamePhase.DiceRoll,
-               activeDiceRoll: {
-                   playerId: victim.id,
-                   attribute: attr,
-                   count: victim.attributes[attr],
-                   target: 1,
-                   description: `Resist!`,
-                   onSuccess: () => setGameState(ps => ({ 
-                      ...ps, 
-                      phase: GamePhase.Mythos, 
-                      activeDiceRoll: undefined,
-                      mythosEvent: { text: ps.mythosEvent?.text || "You resist.", type: 'FLAVOR' }
-                   })),
-                   onFail: () => {
-                       setGameState(ps => ({ 
-                         ...ps, 
-                         phase: GamePhase.Mythos, 
-                         activeDiceRoll: undefined,
-                         mythosEvent: { text: ps.mythosEvent?.text || "You fail to resist.", type: 'FLAVOR' }
-                        }));
-                       addLog(`${victim.name} takes 1 Horror.`, true);
-                       applyDamage(victim.id, 0, 1);
-                   }
-               }
-           }));
-        }, 3000);
-    }
-
-    setLoading(false);
-  };
-
   const endMythosPhase = () => {
     const currentState = gameStateRef.current;
     if (currentState.players.length === 0) {
@@ -1525,101 +1325,161 @@ const App: React.FC = () => {
     addLog("New Round.", false);
   };
 
-  const handleMonsterClick = (monster: Monster, remote = false) => {
-    const currentState = gameStateRef.current;
-    if (currentState.phase !== GamePhase.Playing) return;
-
-    if (currentState.networkMode === NetworkMode.Client && !remote) {
-        sendAction('ACTION_MONSTER_CLICK', { monsterId: monster.id });
-        return;
-    }
-
-    const player = currentState.players[currentState.currentPlayerIndex];
-    if (player.x !== monster.x || player.y !== monster.y) {
-        addLog("Too far away.", false);
-        return;
-    }
-    
-    if (player.actionsRemaining <= 0) {
-        addLog("No actions remaining to attack!", false);
-        return;
-    }
-
-    setGameState(prev => ({
-        ...prev,
-        phase: GamePhase.DiceRoll,
-        activeDiceRoll: {
-            playerId: player.id,
-            attribute: Attribute.Strength,
-            count: player.attributes[Attribute.Strength],
-            target: monster.tier, 
-            description: `Attacking ${monster.name}`,
-            onSuccess: (rolls) => resolveCombat(monster, player, rolls),
-            onFail: (rolls) => resolveCombat(monster, player, rolls)
-        }
-    }));
+  const runMythosPhase = async () => {
+      const currentState = gameStateRef.current;
+      const nextRound = currentState.round + 1;
+      const threat = Math.min(10, nextRound + (currentState.difficulty === 'Hard' ? 2 : 0));
+      
+      setGameState(prev => ({ ...prev, phase: GamePhase.Mythos, round: nextRound }));
+      
+      try {
+          const event = await GeminiService.generateMythosEvent(currentState.storyContext, threat);
+          
+          let logMsg = event.narrative;
+          let newMonsters = [...currentState.monsters];
+          let newPlayers = [...currentState.players];
+          
+          if (event.type === 'SPAWN') {
+             const tile = currentState.tiles[Math.floor(Math.random() * currentState.tiles.length)];
+             const mTemplate = MONSTER_TEMPLATES.find(m => m.tier === (threat > 6 ? 2 : 1)) || MONSTER_TEMPLATES[0];
+             const monster: Monster = {
+                 id: `m_${Date.now()}`,
+                 templateId: mTemplate.id,
+                 name: mTemplate.name,
+                 health: mTemplate.health,
+                 maxHealth: mTemplate.health,
+                 damage: mTemplate.damage,
+                 horror: mTemplate.horror,
+                 tier: mTemplate.tier as any,
+                 x: tile.x,
+                 y: tile.y,
+                 image: mTemplate.image
+             };
+             newMonsters.push(monster);
+             logMsg += ` A ${monster.name} appears!`;
+          } else if (event.type === 'TEST') {
+             // Simple global horror test
+             logMsg += " The darkness presses in. All investigators take 1 Horror.";
+             newPlayers = newPlayers.map(p => ({ ...p, sanity: Math.max(0, p.sanity - 1) }));
+          }
+          
+          setGameState(prev => ({ 
+              ...prev, 
+              monsters: newMonsters,
+              players: newPlayers,
+              mythosEvent: { text: logMsg, type: event.type as any },
+              log: [...prev.log, logMsg]
+          }));
+          speak(logMsg);
+      } catch (e) {
+          endMythosPhase(); 
+      }
   };
 
-  const resolveCombat = (monster: Monster, player: Player, rolls: DiceFace[]) => {
-      // Improved Weapon Logic
-      const hasWeapon = player.items.some(itemName => ITEMS[itemName]?.type === 'Weapon');
-      const hasShotgun = player.items.includes("Shotgun");
-      const hasHolyWater = player.items.includes("Holy Water");
-      const isSpirit = monster.name.includes("Spirit") || monster.name.includes("Ghost");
+  const resolveCombat = (monsterId: string, hit: boolean, damage: number) => {
+     setGameState(prev => {
+         let newMonsters = [...prev.monsters];
+         const mIdx = newMonsters.findIndex(m => m.id === monsterId);
+         let msg = "";
+         if (mIdx !== -1 && hit) {
+             newMonsters[mIdx] = { ...newMonsters[mIdx], health: newMonsters[mIdx].health - damage };
+             if (newMonsters[mIdx].health <= 0) {
+                 msg = `You defeated the ${newMonsters[mIdx].name}!`;
+                 newMonsters.splice(mIdx, 1);
+             } else {
+                 msg = `You hit the ${newMonsters[mIdx].name} for ${damage} damage.`;
+             }
+         } else {
+             msg = "Attack missed!";
+         }
+         return {
+             ...prev,
+             monsters: newMonsters,
+             phase: GamePhase.Playing,
+             activeDiceRoll: undefined,
+             log: [...prev.log, msg]
+         };
+     });
+  };
 
-      let bonusHits = hasWeapon ? 1 : 0;
-      if (hasShotgun) bonusHits = 2; // Shotgun deals more damage
-      
-      const rollHits = rolls.filter(r => r === DiceFace.ElderSign).length;
-      let hits = rollHits + bonusHits;
+  const handleMonsterClick = (monster: Monster, remote = false) => {
+      const currentState = gameStateRef.current;
+      if (currentState.phase !== GamePhase.Playing) return;
 
-      // Special Instakill Logic
-      if (hasHolyWater && isSpirit) {
-          hits = 999;
-          addLog("Holy Water burns the spirit away instantly!", true);
+      if (currentState.networkMode === NetworkMode.Client && !remote) {
+          sendAction('ACTION_MONSTER_CLICK', { monsterId: monster.id });
+          return;
       }
 
-      let newMonsterHealth = monster.health - hits;
-      let updatedMonsters = [...gameState.monsters];
+      const player = currentState.players[currentState.currentPlayerIndex];
       
-      let msg = "";
-      if (hasShotgun) msg += "(+2 Shotgun) ";
-      else if (hasWeapon) msg += "(+1 Weapon) ";
-      
-      if (newMonsterHealth <= 0) {
-          updatedMonsters = updatedMonsters.filter(m => m.id !== monster.id);
-          addLog(`${msg}${monster.name} defeated!`, true);
-          if (player.sanity < 5) {
-             // slight relief
-          }
-      } else {
-          updatedMonsters = updatedMonsters.map(m => m.id === monster.id ? { ...m, health: newMonsterHealth } : m);
-          addLog(`${msg}Hit for ${hits} damage.`, false);
+      if (player.actionsRemaining <= 0) {
+          addLog("No actions remaining.", false);
+          return;
       }
-      
-      const pIndex = gameState.players.findIndex(p => p.id === player.id);
-      const updatedPlayers = [...gameState.players];
-      updatedPlayers[pIndex].actionsRemaining--; 
+
+      if (Math.abs(player.x - monster.x) + Math.abs(player.y - monster.y) > 0) {
+           const hasGun = player.items.some(i => i.includes('Revolver') || i.includes('Shotgun'));
+           if (!hasGun) {
+               addLog("Too far to attack! (Need firearm)", false);
+               return;
+           }
+      }
+
+      const weapon = player.items.find(i => ITEMS[i]?.type === 'Weapon');
+      const baseDmg = 1;
+      const weaponDmg = weapon ? (weapon.includes('Shotgun') ? 2 : 1) : 0;
+      const totalDmg = baseDmg + weaponDmg;
+      const str = player.attributes[Attribute.Strength];
 
       setGameState(prev => ({
           ...prev,
-          phase: GamePhase.Playing,
-          players: updatedPlayers,
-          monsters: updatedMonsters,
-          activeDiceRoll: undefined
+          phase: GamePhase.DiceRoll,
+          activeDiceRoll: {
+              playerId: player.id,
+              attribute: Attribute.Strength,
+              count: str,
+              target: 2, 
+              description: `Attacking ${monster.name}`,
+              onSuccess: () => resolveCombat(monster.id, true, totalDmg),
+              onFail: () => resolveCombat(monster.id, false, 0)
+          }
       }));
+      
+      updatePlayerAction(player.id, -1);
   };
 
   const endTurn = (remote = false) => {
-    const currentState = gameStateRef.current;
-    if (currentState.networkMode === NetworkMode.Client && !remote) {
-        sendAction('ACTION_END_TURN', {});
-        return;
-    }
+      const currentState = gameStateRef.current;
+      if (currentState.networkMode === NetworkMode.Client && !remote) {
+           sendAction('ACTION_END_TURN', {});
+           return;
+      }
+      
+      const player = currentState.players[currentState.currentPlayerIndex];
+      const enemies = currentState.monsters.filter(m => m.x === player.x && m.y === player.y);
+      if (enemies.length > 0) {
+          let totalDmg = 0;
+          let totalHorror = 0;
+          enemies.forEach(m => { totalDmg += m.damage; totalHorror += m.horror; });
+          if (totalDmg > 0 || totalHorror > 0) {
+              addLog(`${player.name} is attacked by enemies!`, true);
+              applyDamage(player.id, totalDmg, totalHorror);
+          }
+      }
 
-    const nextIndex = currentState.currentPlayerIndex + 1;
-    if (nextIndex >= currentState.players.length) startMythosPhase();
-    else setGameState(prev => ({ ...prev, currentPlayerIndex: nextIndex }));
+      const nextIndex = (currentState.currentPlayerIndex + 1) % currentState.players.length;
+      if (nextIndex === 0) {
+          runMythosPhase();
+      } else {
+           setGameState(prev => ({ 
+               ...prev, 
+               currentPlayerIndex: nextIndex,
+               players: prev.players.map(p => p.id === prev.players[nextIndex].id ? 
+                   { ...p, actionsRemaining: p.isWounded ? 1 : 2, movesRemaining: p.isWounded ? 1 : 2 } : p)
+           }));
+           speak(`It is ${currentState.players[nextIndex].name}'s turn.`);
+      }
   };
 
   // --- Render ---
@@ -1627,6 +1487,10 @@ const App: React.FC = () => {
   
   const activeTemplateId = previewInvId || selectedInvId || INVESTIGATOR_TEMPLATES[0].id;
   const activeTemplate = INVESTIGATOR_TEMPLATES.find(t => t.id === activeTemplateId) || INVESTIGATOR_TEMPLATES[0];
+
+  // Logic to identify if local player is registered
+  const myPlayer = gameState.players.find(p => p.id === myPlayerId);
+  const isRegistered = !!myPlayer;
 
   return (
     <div className="h-screen w-screen bg-black overflow-hidden flex flex-col text-gray-200 font-serif relative">
@@ -1760,43 +1624,56 @@ const App: React.FC = () => {
                           <div className="flex-1 flex gap-6 min-h-0">
                               {/* Left Column: Player Details & Roster */}
                               <div className="w-1/4 flex flex-col gap-6 border-r-2 border-black/10 pr-6">
-                                  <div>
-                                      <label className="block text-black font-bold uppercase text-xs mb-2 tracking-widest">Investigator Name</label>
-                                      <input 
-                                        className="w-full bg-transparent border-b-2 border-black/50 p-2 text-xl font-serif text-[#2b1d0e] placeholder-black/30 focus:outline-none focus:border-red-900" 
-                                        placeholder="Enter name..." 
-                                        value={lobbyName} 
-                                        onChange={e => setLobbyName(e.target.value)} 
-                                      />
-                                  </div>
-
-                                  <div>
-                                      <label className="block text-black font-bold uppercase text-xs mb-2 tracking-widest">Difficulty</label>
-                                      <select 
-                                        className="w-full bg-[#dacbb6] border border-[#bfa68a] p-2 text-[#2b1d0e] font-serif focus:outline-none focus:border-red-900 shadow-inner"
-                                        value={gameState.difficulty}
-                                        onChange={(e) => setGameState(prev => ({...prev, difficulty: e.target.value as any}))}
-                                        disabled={gameState.networkMode === NetworkMode.Client}
-                                      >
-                                          <option value="Easy">★ Easy (Max 1 enemy/player)</option>
-                                          <option value="Normal">★★ Normal (Max 2 enemies/player)</option>
-                                          <option value="Hard">★★★ Hard (Max 3 enemies/player)</option>
-                                      </select>
-                                  </div>
-                                  
-                                  <div>
-                                      <label className="block text-black font-bold uppercase text-xs mb-2 tracking-widest">Marker Color</label>
-                                      <div className="flex gap-2 flex-wrap">
-                                          {['#9f1239', '#b45309', '#15803d', '#1d4ed8', '#4c1d95', '#be123c'].map(c => (
-                                              <button 
-                                                key={c}
-                                                onClick={() => setPlayerColor(c)}
-                                                className={`w-8 h-8 rounded-full border-2 shadow-sm ${playerColor === c ? 'border-black scale-110' : 'border-transparent opacity-70'}`}
-                                                style={{ backgroundColor: c }}
-                                              />
-                                          ))}
+                                  {!isRegistered && (
+                                    <>
+                                      <div>
+                                          <label className="block text-black font-bold uppercase text-xs mb-2 tracking-widest">Investigator Name</label>
+                                          <input 
+                                            className="w-full bg-transparent border-b-2 border-black/50 p-2 text-xl font-serif text-[#2b1d0e] placeholder-black/30 focus:outline-none focus:border-red-900" 
+                                            placeholder="Enter name..." 
+                                            value={lobbyName} 
+                                            onChange={e => setLobbyName(e.target.value)} 
+                                          />
                                       </div>
-                                  </div>
+
+                                      <div>
+                                          <label className="block text-black font-bold uppercase text-xs mb-2 tracking-widest">Marker Color</label>
+                                          <div className="flex gap-2 flex-wrap">
+                                              {['#9f1239', '#b45309', '#15803d', '#1d4ed8', '#4c1d95', '#be123c'].map(c => (
+                                                  <button 
+                                                    key={c}
+                                                    onClick={() => setPlayerColor(c)}
+                                                    className={`w-8 h-8 rounded-full border-2 shadow-sm ${playerColor === c ? 'border-black scale-110' : 'border-transparent opacity-70'}`}
+                                                    style={{ backgroundColor: c }}
+                                                  />
+                                              ))}
+                                          </div>
+                                      </div>
+                                    </>
+                                  )}
+                                  
+                                  {isRegistered && (
+                                      <div className="bg-black/10 p-4 rounded border border-black/20 text-center">
+                                          <div className="text-sm font-bold uppercase tracking-widest mb-1">Your Investigator</div>
+                                          <div className="text-xl font-serif font-bold text-[#2b1d0e]">{myPlayer.name}</div>
+                                          <div className="text-xs text-gray-600 italic">Waiting for mission start...</div>
+                                      </div>
+                                  )}
+
+                                  {gameState.networkMode === NetworkMode.Host && (
+                                      <div>
+                                          <label className="block text-black font-bold uppercase text-xs mb-2 tracking-widest">Difficulty</label>
+                                          <select 
+                                            className="w-full bg-[#dacbb6] border border-[#bfa68a] p-2 text-[#2b1d0e] font-serif focus:outline-none focus:border-red-900 shadow-inner"
+                                            value={gameState.difficulty}
+                                            onChange={(e) => setGameState(prev => ({...prev, difficulty: e.target.value as any}))}
+                                          >
+                                              <option value="Easy">★ Easy (Max 1 enemy/player)</option>
+                                              <option value="Normal">★★ Normal (Max 2 enemies/player)</option>
+                                              <option value="Hard">★★★ Hard (Max 3 enemies/player)</option>
+                                          </select>
+                                      </div>
+                                  )}
 
                                   <div className="mt-auto flex-1 overflow-y-auto pr-2">
                                       <h3 className="text-black font-bold uppercase text-xs mb-2 tracking-widest sticky top-0 bg-[#e8dfc5] z-10 py-2">Team Roster</h3>
@@ -1805,7 +1682,8 @@ const App: React.FC = () => {
                                               <li key={p.id} className="flex items-center gap-2 text-[#2b1d0e] font-serif border-b border-black/10 pb-1">
                                                   <span className="w-3 h-3 rounded-full shrink-0" style={{ backgroundColor: p.color }}></span>
                                                   <span className="font-bold truncate">{p.name}</span>
-                                                  <span className="text-xs opacity-70 ml-auto whitespace-nowrap">{INVESTIGATOR_TEMPLATES.find(t => t.id === p.investigatorId)?.name}</span>
+                                                  <span className="text-xs opacity-70 ml-2 whitespace-nowrap">{INVESTIGATOR_TEMPLATES.find(t => t.id === p.investigatorId)?.name}</span>
+                                                  {p.isReady && <span className="ml-auto text-green-700 font-bold text-[10px] uppercase border border-green-600 px-1 rounded">Ready</span>}
                                               </li>
                                           ))}
                                           {gameState.players.length === 0 && <li className="text-black/40 italic">No investigators registered.</li>}
@@ -1817,7 +1695,7 @@ const App: React.FC = () => {
                               <div className="flex-1 flex flex-col min-h-0 border-r-2 border-black/10 pr-6">
                                   <label className="block text-black font-bold uppercase text-xs mb-4 tracking-widest">Select Investigator Profile</label>
                                   {/* Compact grid to fit all 10 without scroll */}
-                                  <div className="flex-1 grid grid-cols-2 gap-3 content-start">
+                                  <div className={`flex-1 grid grid-cols-2 gap-3 content-start ${isRegistered ? 'opacity-50 pointer-events-none' : ''}`}>
                                        {INVESTIGATOR_TEMPLATES.map(t => (
                                            <div 
                                              key={t.id} 
@@ -1889,256 +1767,210 @@ const App: React.FC = () => {
                           </div>
 
                           <div className="mt-6 flex gap-4 pt-4 border-t-2 border-black/20 shrink-0">
-                               <button 
-                                 onClick={joinGame} 
-                                 disabled={!selectedInvId || !lobbyName} 
-                                 className="flex-1 py-3 bg-[#2b1d0e] text-[#e8dfc5] font-serif uppercase tracking-widest font-bold text-lg hover:bg-[#3e2b18] disabled:opacity-50 disabled:cursor-not-allowed shadow-lg"
-                               >
-                                  Register Investigator
-                               </button>
-                               {gameState.players.length > 0 && gameState.networkMode !== NetworkMode.Client && (
+                               {!isRegistered ? (
                                    <button 
-                                     onClick={prepareItemDistribution} 
-                                     className="flex-1 py-3 bg-red-900 text-white font-serif uppercase tracking-widest font-bold text-lg hover:bg-red-800 shadow-lg border-2 border-red-950"
+                                     onClick={joinGame} 
+                                     disabled={!selectedInvId || !lobbyName} 
+                                     className="flex-1 py-3 bg-[#2b1d0e] text-[#e8dfc5] font-serif uppercase tracking-widest font-bold text-lg hover:bg-[#3e2b18] disabled:opacity-50 disabled:cursor-not-allowed shadow-lg"
                                    >
-                                      Begin Investigation
+                                      Register Investigator
                                    </button>
-                               )}
-                               {gameState.networkMode === NetworkMode.Client && (
-                                   <div className="flex-1 flex items-center justify-center text-[#2b1d0e] italic">
-                                       Waiting for Host to start...
-                                   </div>
+                               ) : (
+                                   <>
+                                     {gameState.networkMode === NetworkMode.Client ? (
+                                         <button 
+                                             onClick={toggleReady}
+                                             className={`flex-1 py-3 font-serif uppercase tracking-widest font-bold text-lg shadow-lg border-2 transition-all
+                                                 ${myPlayer.isReady 
+                                                     ? 'bg-green-800 text-white border-green-900 hover:bg-green-700' 
+                                                     : 'bg-[#5c4033] text-[#e8dfc5] border-[#2b1d0e] hover:bg-[#4a332a]'}
+                                             `}
+                                         >
+                                             {myPlayer.isReady ? "Ready! (Waiting for Host)" : "Ready Up"}
+                                         </button>
+                                     ) : (
+                                         <button 
+                                           onClick={prepareItemDistribution} 
+                                           className="flex-1 py-3 bg-red-900 text-white font-serif uppercase tracking-widest font-bold text-lg hover:bg-red-800 shadow-lg border-2 border-red-950"
+                                         >
+                                            Begin Investigation
+                                         </button>
+                                     )}
+                                   </>
                                )}
                           </div>
                       </div>
                  </div>
             </div>
         ) : gameState.phase === GamePhase.ItemDistribution ? (
-            <div className="w-full h-full flex items-center justify-center p-6 bg-[#0a0a0c] bg-[url('https://www.transparenttextures.com/patterns/dark-matter.png')]">
-                <div className="bg-[#1c1c22] border-4 border-[#b45309] p-8 max-w-6xl w-full h-[90vh] rounded-sm shadow-2xl relative flex flex-col">
-                    <h2 className="text-3xl font-serif text-[#b45309] uppercase tracking-widest mb-6 text-center border-b border-[#5c4033] pb-4">
-                        Equip Your Investigators
+            <div className="flex-1 bg-[#1a0f0a] flex items-center justify-center p-8">
+                <div className="bg-[#e8dfc5] p-6 max-w-4xl w-full rounded shadow-2xl border-4 border-[#5c4033] relative">
+                    <h2 className="text-3xl font-serif text-[#2b1d0e] mb-4 text-center uppercase tracking-widest border-b-2 border-[#bfa68a] pb-2">
+                        Equipment Requisition
                     </h2>
-                    
-                    <div className="flex-1 flex gap-8 overflow-hidden">
-                        {/* LEFT: Item Pool */}
-                        <div className="flex-1 flex flex-col bg-black/30 p-4 rounded border border-[#5c4033]">
-                            <h3 className="text-[#e2e8f0] font-bold uppercase tracking-wide mb-4 text-center">Available Equipment</h3>
-                            <div className="flex-1 overflow-y-auto grid grid-cols-2 gap-3 content-start">
-                                {distributionItems.map((item, idx) => {
-                                    const details = ITEMS[item];
-                                    const isSelected = selectedDistItem === idx;
-                                    return (
+                    {gameState.networkMode === NetworkMode.Client ? (
+                        <div className="text-center py-10">
+                            <p className="text-xl text-[#5c4033] animate-pulse">The Expedition Leader is distributing supplies...</p>
+                        </div>
+                    ) : (
+                        <div className="flex gap-6">
+                            <div className="w-1/3 border-r border-[#bfa68a] pr-4">
+                                <h3 className="font-bold text-[#5c4033] mb-2 uppercase text-xs">Available Supplies</h3>
+                                <div className="space-y-2">
+                                    {distributionItems.map((item, idx) => (
                                         <div 
-                                            key={idx}
-                                            onClick={() => setSelectedDistItem(idx)}
-                                            className={`
-                                                p-3 border rounded cursor-pointer transition-all hover:bg-[#2b1d0e]
-                                                ${isSelected ? 'border-yellow-500 bg-[#3e2b18] scale-105' : 'border-[#5c4033] bg-[#1a1a20]'}
-                                            `}
+                                          key={idx}
+                                          onClick={() => setSelectedDistItem(idx)}
+                                          className={`p-2 border cursor-pointer ${selectedDistItem === idx ? 'bg-[#2b1d0e] text-[#e8dfc5] border-[#2b1d0e]' : 'bg-[#dacbb6] text-[#2b1d0e] border-[#c9b8a0] hover:bg-[#c9b8a0]'}`}
                                         >
-                                            <div className="font-bold text-yellow-500 font-serif">{item}</div>
-                                            <div className="text-[10px] text-gray-400 mt-1 uppercase tracking-wider">{details?.type}</div>
-                                            <div className="text-xs text-gray-300 mt-1 italic">{details?.description}</div>
+                                            {item}
                                         </div>
-                                    );
-                                })}
-                                {distributionItems.length === 0 && (
-                                    <div className="col-span-2 text-center text-gray-500 italic py-10">All items distributed.</div>
-                                )}
+                                    ))}
+                                    {distributionItems.length === 0 && <p className="text-sm italic text-gray-500">No items remaining.</p>}
+                                </div>
+                            </div>
+                            <div className="flex-1">
+                                <h3 className="font-bold text-[#5c4033] mb-2 uppercase text-xs">Assign to Investigator</h3>
+                                <div className="grid grid-cols-2 gap-3">
+                                    {gameState.players.map((p, idx) => (
+                                        <div key={p.id} className="bg-[#dacbb6] p-3 rounded border border-[#c9b8a0]">
+                                            <div className="font-bold text-[#2b1d0e]">{p.name}</div>
+                                            <div className="text-xs text-[#5c4033] mb-2">Items: {p.items.length}</div>
+                                            <div className="flex flex-wrap gap-1 mb-2">
+                                                {p.items.map((i, k) => <span key={k} className="text-[10px] bg-[#e8dfc5] px-1 border border-[#bfa68a]">{i}</span>)}
+                                            </div>
+                                            <button 
+                                              onClick={() => assignItemToPlayer(idx)}
+                                              disabled={selectedDistItem === null}
+                                              className="w-full py-1 bg-[#5c4033] text-[#e8dfc5] text-xs font-bold uppercase hover:bg-[#4a332a] disabled:opacity-50"
+                                            >
+                                                Assign
+                                            </button>
+                                        </div>
+                                    ))}
+                                </div>
                             </div>
                         </div>
-
-                        {/* RIGHT: Investigators */}
-                        <div className="flex-1 flex flex-col bg-[#e8dfc5] p-4 rounded border border-[#8b6b4b] text-[#2b1d0e]">
-                            <h3 className="font-bold uppercase tracking-wide mb-4 text-center text-[#5c4033]">Personnel</h3>
-                            <div className="flex-1 overflow-y-auto space-y-4">
-                                {gameState.players.map((p, pIdx) => (
-                                    <div 
-                                        key={p.id}
-                                        onClick={() => assignItemToPlayer(pIdx)}
-                                        className={`
-                                            p-3 border-2 rounded transition-all cursor-pointer relative group
-                                            ${selectedDistItem !== null ? 'hover:border-green-600 hover:bg-[#d4c5b0] hover:shadow-lg' : 'border-[#bfa68a] bg-[#dacbb6]'}
-                                        `}
-                                    >
-                                        <div className="flex justify-between items-center mb-2">
-                                            <div className="font-bold font-serif text-lg">{p.name}</div>
-                                            {selectedDistItem !== null && (
-                                                <div className="text-xs bg-green-700 text-white px-2 py-1 rounded opacity-0 group-hover:opacity-100 transition-opacity font-bold uppercase">
-                                                    Equip Item
-                                                </div>
-                                            )}
-                                        </div>
-                                        <div className="text-xs text-[#5c4033] uppercase font-bold mb-1">Inventory:</div>
-                                        <div className="flex flex-wrap gap-2">
-                                            {p.items.map((it, i) => (
-                                                <span key={i} className="bg-white border border-[#bfa68a] px-2 py-1 rounded text-xs shadow-sm">
-                                                    {it}
-                                                </span>
-                                            ))}
-                                            {p.items.length === 0 && <span className="text-xs text-gray-500 italic">No items equipped</span>}
-                                        </div>
-                                    </div>
-                                ))}
-                            </div>
+                    )}
+                    {gameState.networkMode === NetworkMode.Host && (
+                        <div className="mt-6 flex justify-center">
+                            <button 
+                              onClick={generateMapAndIntro}
+                              disabled={distributionItems.length > 0}
+                              className="px-8 py-3 bg-red-900 text-white font-serif uppercase tracking-widest font-bold hover:bg-red-800 disabled:opacity-50 shadow-lg border-2 border-red-950"
+                            >
+                                Enter the Mansion
+                            </button>
                         </div>
-                    </div>
-
-                    <div className="mt-6 pt-4 border-t border-[#5c4033] flex justify-center">
-                        <button 
-                            onClick={generateMapAndIntro}
-                            className="px-10 py-3 bg-red-900 text-white font-serif font-bold uppercase tracking-widest text-xl hover:bg-red-800 border-2 border-red-950 shadow-lg transition-transform hover:scale-105"
-                        >
-                            Start Investigation
-                        </button>
-                    </div>
+                    )}
                 </div>
             </div>
         ) : (
-            !showTitleScreen && (
-            <>
-                <div className="w-72 bg-[#151518] border-r border-[#3e2723] p-4 overflow-y-auto flex flex-col gap-4 z-10 shadow-xl">
-                  {gameState.players.map((p, idx) => (
-                    <InvestigatorCard 
-                        key={p.id} 
-                        player={p} 
-                        isActive={idx === gameState.currentPlayerIndex && gameState.phase === GamePhase.Playing} 
-                        onUseItem={idx === gameState.currentPlayerIndex ? handleUseItem : undefined}
-                    />
-                  ))}
-                </div>
-                <div className="flex-1 relative bg-black shadow-inner">
-                  <MapBoard 
-                    tiles={gameState.tiles} 
-                    tokens={gameState.tokens} 
-                    monsters={gameState.monsters}
-                    players={gameState.players}
-                    currentPlayerId={currentPlayer?.id}
-                    onTokenClick={handleTokenClick}
-                    onTileClick={handleTileClick}
-                    onMonsterClick={handleMonsterClick}
-                  />
-                  {gameState.phase === GamePhase.Mythos && gameState.mythosEvent && (
-                     <div className="absolute inset-0 z-40 bg-black/90 flex items-center justify-center p-8 backdrop-blur-md">
-                        <div className="max-w-2xl w-full bg-[#0f0a0a] border-4 border-double border-[#5c1a1a] p-10 rounded-sm text-center shadow-[0_0_50px_rgba(139,0,0,0.3)] relative">
-                           {/* Ornate header */}
-                           <div className="mb-6">
-                               <h2 className="text-4xl font-serif text-[#bd2b2b] tracking-widest uppercase mb-2">Mythos Phase</h2>
-                               <div className="h-1 w-24 bg-[#5c1a1a] mx-auto"></div>
-                           </div>
-                           
-                           <p className="text-xl text-[#d4c5b0] font-serif leading-relaxed mb-8 italic">"{gameState.mythosEvent.text}"</p>
-                           
-                           {!gameState.activeDiceRoll && gameState.mythosEvent.type !== 'TEST' && (
-                               <button 
-                                 onClick={endMythosPhase} 
-                                 className="px-8 py-3 bg-transparent border-2 border-[#b45309] text-[#b45309] hover:bg-[#b45309] hover:text-white font-serif uppercase tracking-widest font-bold transition-all"
-                               >
-                                  Continue
-                               </button>
-                           )}
-                        </div>
-                     </div>
-                  )}
-                  {gameState.phase === GamePhase.GameOver && (
-                      <div className="absolute inset-0 z-50 bg-red-950/90 flex items-center justify-center p-10 flex-col gap-4">
-                           <h1 className="text-6xl text-red-500 font-bold font-serif uppercase tracking-widest drop-shadow-lg">Game Over</h1>
-                           <p className="text-xl text-red-200 font-serif">The darkness has consumed you...</p>
-                           <button 
-                             onClick={resetGame}
-                             className="mt-8 px-8 py-3 bg-[#5c1a1a] text-[#e8dfc5] border-2 border-[#3e2723] font-serif uppercase tracking-widest font-bold hover:bg-[#3e2723] transition-colors shadow-xl"
-                           >
-                              Return to Title
-                           </button>
-                      </div>
-                  )}
-                  {gameState.phase === GamePhase.Victory && (
-                      <div className="absolute inset-0 z-50 bg-[#e8dfc5] flex items-center justify-center p-10 flex-col gap-4 bg-[url('https://www.transparenttextures.com/patterns/parchment.png')]">
-                           <h1 className="text-6xl text-[#b45309] font-bold font-serif uppercase tracking-widest drop-shadow-lg">Case Closed</h1>
-                           <p className="text-2xl text-[#3e2723] font-serif italic max-w-2xl text-center">
-                               "You escaped the manor with the evidence. The horrors within may still linger, but tonight, humanity survives."
-                           </p>
-                           <button 
-                             onClick={resetGame}
-                             className="mt-8 px-8 py-3 bg-[#2b1d0e] border-2 border-[#5c4033] text-[#e8dfc5] font-serif uppercase tracking-widest font-bold hover:bg-[#3e2b18] hover:text-white transition-all shadow-xl"
-                           >
-                              Return to Title
-                           </button>
-                      </div>
-                  )}
-                </div>
-                <div className="w-72 bg-[#e8dfc5] border-l border-[#8b6b4b] p-4 text-black font-serif overflow-y-auto shadow-xl relative">
-                     <div className="absolute inset-0 bg-[url('https://www.transparenttextures.com/patterns/parchment.png')] opacity-50 pointer-events-none mix-blend-multiply"></div>
-                     <div className="flex justify-between items-center border-b-2 border-black/10 pb-2 mb-4 relative z-10 text-[#5c4033]">
-                         <div className="w-6"></div> {/* Spacer for centering */}
-                         <h3 className="font-bold uppercase tracking-widest">Adventure Log</h3>
-                         <button
-                           onClick={() => {
-                             if (narrationEnabled) window.speechSynthesis.cancel();
-                             setNarrationEnabled(!narrationEnabled);
-                           }}
-                           className="w-6 hover:text-black transition-colors flex justify-end"
-                           title={narrationEnabled ? "Turn Narration Off" : "Turn Narration On"}
-                         >
-                           {narrationEnabled ? "🔊" : "🔇"}
-                         </button>
-                     </div>
-                    {gameState.log.map((l, i) => (
-                        <div key={i} className="mb-3 border-b border-black/5 pb-2 text-sm leading-snug relative z-10">
-                            {l}
+            // Playing Phase
+            <div className="relative w-full h-full flex">
+               {/* Map Area */}
+               <div className="flex-1 relative bg-black">
+                   <MapBoard 
+                     tiles={gameState.tiles}
+                     tokens={gameState.tokens}
+                     players={gameState.players}
+                     monsters={gameState.monsters}
+                     onTokenClick={handleTokenClick}
+                     onTileClick={handleTileClick}
+                     onMonsterClick={handleMonsterClick}
+                     currentPlayerId={currentPlayer?.id}
+                   />
+               </div>
+
+               {/* Right Sidebar: Logs & Chat */}
+               <div className="w-80 bg-[#1a0f0a] border-l border-[#3e2723] flex flex-col relative z-20">
+                   <div className="p-2 bg-[#2b1d0e] text-[#e8dfc5] text-center font-bold uppercase tracking-widest text-xs border-b border-[#3e2723]">
+                       Investigation Log
+                   </div>
+                   <div className="flex-1 overflow-y-auto p-4 space-y-3 font-serif text-sm">
+                       {gameState.log.map((msg, i) => (
+                           <p key={i} className="text-[#d4c5b0] border-b border-[#3e2723]/50 pb-2 last:border-0">{msg}</p>
+                       ))}
+                       <div ref={el => el?.scrollIntoView({ behavior: 'smooth' })} />
+                   </div>
+               </div>
+
+               {/* Bottom Bar: Cards */}
+               <div className="absolute bottom-0 left-0 right-80 h-48 bg-[#0f0a0a]/90 border-t border-[#3e2723] p-4 flex gap-4 overflow-x-auto z-30 backdrop-blur-sm">
+                    {gameState.players.map(p => (
+                        <div key={p.id} className="w-64 shrink-0">
+                            <InvestigatorCard 
+                                player={p} 
+                                isActive={currentPlayer?.id === p.id} 
+                                onUseItem={(item) => handleUseItem(item)}
+                            />
                         </div>
                     ))}
-                    <div ref={(el) => el?.scrollIntoView({ behavior: 'smooth' })} />
-                </div>
-            </>
-            )
+               </div>
+               
+               {/* Overlays */}
+               {gameState.phase === GamePhase.DiceRoll && gameState.activeDiceRoll && (
+                   <DiceRoller 
+                       attribute={gameState.activeDiceRoll.attribute}
+                       amount={gameState.activeDiceRoll.count}
+                       target={gameState.activeDiceRoll.target}
+                       playerClues={currentPlayer.clues}
+                       playerColor={currentPlayer.color}
+                       playerItems={currentPlayer.items}
+                       usedItemAbilityRound={currentPlayer.usedItemAbilityRound}
+                       onComplete={gameState.activeDiceRoll.onSuccess}
+                       onConsumeItem={handleConsumeItem}
+                       onMarkItemUsed={handleMarkItemUsed}
+                       onCancel={() => {}} // Dice rolls mostly can't be cancelled once started
+                   />
+               )}
+
+               {gameState.phase === GamePhase.Puzzle && gameState.activePuzzle && (
+                   <>
+                     {gameState.activePuzzle.type === PuzzleType.Sliding && (
+                         <SlidingPuzzle onComplete={gameState.activePuzzle.onSuccess} onFail={gameState.activePuzzle.onFail} />
+                     )}
+                     {gameState.activePuzzle.type === PuzzleType.Rune && (
+                         <RunePuzzle onComplete={gameState.activePuzzle.onSuccess} onFail={gameState.activePuzzle.onFail} />
+                     )}
+                     {gameState.activePuzzle.type === PuzzleType.Code && (
+                         <CodePuzzle onComplete={gameState.activePuzzle.onSuccess} onFail={gameState.activePuzzle.onFail} />
+                     )}
+                   </>
+               )}
+
+               {gameState.phase === GamePhase.Mythos && gameState.mythosEvent && (
+                   <div className="fixed inset-0 bg-black/95 z-50 flex items-center justify-center p-8 text-center cursor-pointer" onClick={endMythosPhase}>
+                        <div className="max-w-2xl">
+                            <h2 className="text-4xl text-mythos-blood font-serif font-bold mb-6 tracking-widest uppercase animate-pulse">Mythos Phase</h2>
+                            <p className="text-xl text-[#e8dfc5] font-serif leading-relaxed mb-8">{gameState.mythosEvent.text}</p>
+                            <p className="text-gray-500 text-sm uppercase tracking-widest blink">Click to Continue</p>
+                        </div>
+                   </div>
+               )}
+
+               {(gameState.phase === GamePhase.GameOver || gameState.phase === GamePhase.Victory) && (
+                   <div className="fixed inset-0 bg-black z-[100] flex items-center justify-center text-center p-8">
+                        <div>
+                            <h1 className={`text-6xl font-serif font-bold mb-4 tracking-widest ${gameState.phase === GamePhase.Victory ? 'text-green-600' : 'text-red-900'}`}>
+                                {gameState.phase === GamePhase.Victory ? 'SURVIVED' : 'DEFEATED'}
+                            </h1>
+                            <p className="text-2xl text-gray-400 font-serif mb-8 max-w-xl mx-auto">
+                                {gameState.phase === GamePhase.Victory 
+                                    ? "You have escaped the mansion with your lives. The horrors within remain, but you are safe... for now."
+                                    : "The darkness claims you. Another group of souls lost to the echoing madness."
+                                }
+                            </p>
+                            <button onClick={resetGame} className="px-8 py-3 border-2 border-white text-white uppercase font-bold hover:bg-white hover:text-black transition-colors">
+                                Return to Lobby
+                            </button>
+                        </div>
+                   </div>
+               )}
+
+            </div>
         )}
       </div>
-
-      {gameState.phase === GamePhase.DiceRoll && gameState.activeDiceRoll && (
-        <DiceRoller
-          attribute={gameState.activeDiceRoll.attribute}
-          amount={gameState.activeDiceRoll.count}
-          playerClues={gameState.players.find(p => p.id === gameState.activeDiceRoll?.playerId)?.clues || 0}
-          playerColor={gameState.players.find(p => p.id === gameState.activeDiceRoll?.playerId)?.color || '#fff'}
-          playerItems={gameState.players.find(p => p.id === gameState.activeDiceRoll?.playerId)?.items || []}
-          usedItemAbilityRound={gameState.players.find(p => p.id === gameState.activeDiceRoll?.playerId)?.usedItemAbilityRound}
-          target={gameState.activeDiceRoll.target}
-          onComplete={(rolls, cluesSpent) => {
-             const pid = gameState.activeDiceRoll!.playerId;
-             if (cluesSpent > 0) {
-               setGameState(prev => ({ ...prev, players: prev.players.map(p => p.id === pid ? { ...p, clues: p.clues - cluesSpent } : p) }));
-             }
-             const successes = rolls.filter(r => r === DiceFace.ElderSign).length;
-             if (successes >= gameState.activeDiceRoll!.target) gameState.activeDiceRoll!.onSuccess(rolls);
-             else gameState.activeDiceRoll!.onFail(rolls);
-          }}
-          onConsumeItem={handleConsumeItem}
-          onMarkItemUsed={handleMarkItemUsed}
-          onCancel={() => setGameState(prev => ({ ...prev, phase: GamePhase.Playing, activeDiceRoll: undefined }))}
-        />
-      )}
-
-      {/* PUZZLE RENDERING */}
-      {gameState.phase === GamePhase.Puzzle && gameState.activePuzzle && (
-          gameState.activePuzzle.type === PuzzleType.Sliding ? (
-              <SlidingPuzzle 
-                  onComplete={gameState.activePuzzle.onSuccess} 
-                  onFail={gameState.activePuzzle.onFail} 
-              />
-          ) : gameState.activePuzzle.type === PuzzleType.Rune ? (
-              <RunePuzzle 
-                  onComplete={gameState.activePuzzle.onSuccess} 
-                  onFail={gameState.activePuzzle.onFail} 
-              />
-          ) : (
-              <CodePuzzle
-                  onComplete={gameState.activePuzzle.onSuccess}
-                  onFail={gameState.activePuzzle.onFail}
-              />
-          )
-      )}
     </div>
   );
 };
