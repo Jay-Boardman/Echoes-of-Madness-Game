@@ -39,6 +39,7 @@ export interface Player {
   isInsane: boolean;
   secretObjective?: string;
   usedItemAbilityRound?: boolean; // Track if they used a "Once per round" item
+  isReady: boolean; // Lobby Ready Status
 }
 
 export interface Monster {
