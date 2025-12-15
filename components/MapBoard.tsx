@@ -23,8 +23,9 @@ const MapBoard: React.FC<Props> = ({ tiles, tokens, players, monsters = [], onTo
   const containerRef = useRef<HTMLDivElement>(null);
   const lastMousePos = useRef({ x: 0, y: 0 });
 
-  const minX = Math.min(...tiles.map(t => t.x));
-  const minY = Math.min(...tiles.map(t => t.y));
+  // Handle empty tiles case gracefully to avoid Math.min on empty array returning Infinity
+  const minX = tiles.length > 0 ? Math.min(...tiles.map(t => t.x)) : 0;
+  const minY = tiles.length > 0 ? Math.min(...tiles.map(t => t.y)) : 0;
   
   const handleWheel = (e: React.WheelEvent) => {
     e.stopPropagation();
