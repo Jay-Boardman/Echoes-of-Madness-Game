@@ -122,6 +122,11 @@ export enum NetworkMode {
   Client = 'CLIENT'
 }
 
+// Action Context Types for serialization
+export type ActionContext = 
+  | { type: 'SEARCH'; tokenId: string }
+  | { type: 'COMBAT'; monsterId: string };
+
 export interface GameState {
   roomCode: string;
   phase: GamePhase;
@@ -139,21 +144,22 @@ export interface GameState {
   evidenceRequired: number;  // New: Goal
   isEscapeOpen: boolean;     // New: Phase flag
   networkMode: NetworkMode;  // New: Track if online
+  
+  // Refactored to be purely serializable (No functions)
   activeDiceRoll?: {
     playerId: string;
     attribute: Attribute;
     count: number;
     target: number; // Number of successes needed
-    onSuccess: (rolls: DiceFace[]) => void;
-    onFail: (rolls: DiceFace[]) => void;
     description: string;
+    context: ActionContext; // Data to identify what to do on completion
   };
   activePuzzle?: {
     type: PuzzleType;
     token: Token;
-    onSuccess: () => void;
-    onFail: () => void;
+    context: ActionContext; // Data to identify what to do on completion
   };
+  
   mythosEvent?: {
     text: string;
     type: 'SPAWN' | 'TEST' | 'FLAVOR';
