@@ -46,6 +46,7 @@ const App: React.FC = () => {
   const [narrationEnabled, setNarrationEnabled] = useState(true);
   const [myPlayerId, setMyPlayerId] = useState<string | null>(null);
   const [connectedClientsCount, setConnectedClientsCount] = useState(0);
+  const [lastNetworkAction, setLastNetworkAction] = useState<string>(''); // Debug info
 
   // Networking Refs
   const peerRef = useRef<any>(null);
@@ -125,18 +126,18 @@ const App: React.FC = () => {
   useEffect(() => {
       if (gameState.networkMode === NetworkMode.Host && connectionsRef.current.length > 0) {
           // SANITIZE STATE BEFORE SENDING
-          // Ensure log isn't too huge and no weird non-serializable objects slipped in
           const safeState = {
               ...gameState,
-              log: gameState.log.slice(-50) // Truncate log history for network performance
+              log: gameState.log.slice(-50)
           };
           
           const syncData = { type: 'SYNC', state: safeState };
+          const payloadString = JSON.stringify(syncData);
           
           connectionsRef.current.forEach(conn => {
               if (conn.open) {
                   try {
-                      conn.send(syncData);
+                      conn.send(payloadString);
                   } catch (e) {
                       console.error("Failed to sync state to client:", e);
                   }
@@ -146,19 +147,15 @@ const App: React.FC = () => {
   }, [gameState]);
 
   const initHost = () => {
-      if (peerRef.current) return; // Prevent double init
+      if (peerRef.current) return; 
       setLoading(true);
 
-      // Generate a short code for display
       const displayCode = Math.random().toString(36).substring(2, 7).toUpperCase();
-      // Use a prefixed ID for PeerJS to avoid collisions
       const peerId = PEER_PREFIX + displayCode;
       
       console.log("Initializing Host with ID:", peerId);
 
-      const peer = new Peer(peerId, {
-          debug: 1
-      });
+      const peer = new Peer(peerId, { debug: 1 });
       
       peer.on('open', (id: string) => {
           console.log("Host Peer Open. ID:", id);
@@ -175,23 +172,23 @@ const App: React.FC = () => {
           
           conn.on('open', () => {
               console.log("Host connection fully opened with", conn.peer);
-              // Send immediate sync using REF to ensure fresh state
+              // Send immediate sync
               try {
-                  conn.send({ type: 'SYNC', state: gameStateRef.current });
+                  const syncData = { type: 'SYNC', state: gameStateRef.current };
+                  conn.send(JSON.stringify(syncData));
               } catch (e) {
                   console.error("Failed to send initial sync:", e);
               }
           });
           
           conn.on('data', (data: any) => {
-              // Call the ref, which points to the fresh handleNetworkData from current render
+              // Call the ref
               if (handleNetworkDataRef.current) {
                   handleNetworkDataRef.current(data);
               }
           });
 
           conn.on('close', () => {
-              console.log("Connection closed");
               setConnectedClientsCount(prev => Math.max(0, prev - 1));
               connectionsRef.current = connectionsRef.current.filter(c => c !== conn);
           });
@@ -211,9 +208,7 @@ const App: React.FC = () => {
   };
 
   const initClient = () => {
-      // Force cleanup of previous attempts to allow retrying code
       if (peerRef.current) {
-          console.log("Cleaning up previous peer instance...");
           peerRef.current.destroy();
           peerRef.current = null;
       }
@@ -225,17 +220,14 @@ const App: React.FC = () => {
 
       setLoading(true);
       
-      const peer = new Peer(undefined, {
-          debug: 1
-      }); 
+      const peer = new Peer(undefined, { debug: 1 }); 
       const targetPeerId = PEER_PREFIX + joinCode.toUpperCase();
       
       console.log("Initializing Client. Connecting to:", targetPeerId);
 
       peer.on('open', () => {
           console.log("Client Peer Open. ID:", peer.id);
-          // Standard connection
-          const conn = peer.connect(targetPeerId);
+          const conn = peer.connect(targetPeerId, { serialization: 'json' }); // Ensure standard serialization
           clientConnRef.current = conn;
           
           conn.on('open', () => {
@@ -246,10 +238,14 @@ const App: React.FC = () => {
               addLog("Connected to Host!", false);
           });
 
-          conn.on('data', (data: any) => {
-              if (data.type === 'SYNC') {
-                  // Client receives authoritative state from Host
-                  setGameState(data.state);
+          conn.on('data', (raw: any) => {
+              try {
+                  const data = typeof raw === 'string' ? JSON.parse(raw) : raw;
+                  if (data.type === 'SYNC') {
+                      setGameState(data.state);
+                  }
+              } catch(e) {
+                  console.error("Client failed to parse sync:", e);
               }
           });
 
@@ -273,7 +269,6 @@ const App: React.FC = () => {
           } else {
               alert("Network Error: " + err.type);
           }
-          // Cleanup on error to allow retry
           if (peerRef.current) {
               peerRef.current.destroy();
               peerRef.current = null;
@@ -284,29 +279,28 @@ const App: React.FC = () => {
   };
 
   // Host handles incoming actions from Clients
-  const handleNetworkData = (data: any) => {
+  const handleNetworkData = (raw: any) => {
       const currentState = gameStateRef.current;
       
-      // Auto-parse if string (fallback for serialization mismatches)
-      if (typeof data === 'string') {
+      let data = raw;
+      if (typeof raw === 'string') {
           try {
-              data = JSON.parse(data);
+              data = JSON.parse(raw);
           } catch (e) {
               console.error("Failed to parse incoming network data:", e);
               return;
           }
       }
 
-      console.log("Handling Network Action:", data.type, data.payload);
+      console.log("HOST RECEIVED ACTION:", data.type, data.payload);
+      setLastNetworkAction(`${data.type} from ${data.payload?.id || '?'}`);
 
-      if (currentState.networkMode !== NetworkMode.Host) {
-          return;
-      }
+      // We removed the stale state check for NetworkMode.Host here because 
+      // if this handler is running, it means we ARE the host receiving data on a server socket.
 
       if (data.type === 'ACTION_REGISTER_PLAYER') {
           const newPlayer = data.payload;
           
-          // STRICT VALIDATION: Ensure payload is valid before state update
           if (!newPlayer || !newPlayer.id || !newPlayer.name) {
               console.error("Invalid Register Payload:", newPlayer);
               return;
@@ -371,9 +365,11 @@ const App: React.FC = () => {
   // Generic Action Sender for Clients
   const sendAction = (type: string, payload: any) => {
       if (clientConnRef.current && clientConnRef.current.open) {
-          console.log("Sending Action:", type, payload);
+          console.log("Client Sending Action:", type, payload);
           try {
-              clientConnRef.current.send({ type, payload });
+              // Explicit JSON stringify to avoid any serialization quirks in PeerJS
+              const msg = JSON.stringify({ type, payload });
+              clientConnRef.current.send(msg);
           } catch (e) {
               console.error("Failed to send action:", e);
               alert("Transmission failed. Reconnecting...");
@@ -434,6 +430,7 @@ const App: React.FC = () => {
     setShowTitleScreen(true);
     setMyPlayerId(null);
     setConnectedClientsCount(0);
+    setLastNetworkAction('');
   };
 
   const joinGame = () => {
@@ -1679,9 +1676,12 @@ const App: React.FC = () => {
                                   <div className="text-2xl text-red-900 font-mono tracking-widest">{gameState.roomCode}</div>
                                   {gameState.networkMode === NetworkMode.Client && <div className="text-xs text-blue-800 font-bold mt-1">Connected as Client</div>}
                                   {gameState.networkMode === NetworkMode.Host && (
-                                      <div className="text-xs font-bold mt-1 flex items-center justify-end gap-1">
-                                          <span className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></span>
-                                          <span className="text-red-800">Hosting Server ({connectedClientsCount} Connected)</span>
+                                      <div className="text-xs font-bold mt-1 flex flex-col items-end">
+                                          <div className="flex items-center gap-1">
+                                              <span className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></span>
+                                              <span className="text-red-800">Hosting Server ({connectedClientsCount} Connected)</span>
+                                          </div>
+                                          {lastNetworkAction && <div className="text-[9px] text-gray-500 font-mono mt-1 opacity-50">Last: {lastNetworkAction}</div>}
                                       </div>
                                   )}
                               </div>
@@ -1761,7 +1761,7 @@ const App: React.FC = () => {
                                                   {p.isReady && <span className="ml-auto text-green-700 font-bold text-[10px] uppercase border border-green-600 px-1 rounded">Ready</span>}
                                               </li>
                                           ))}
-                                          {gameState.players.length === 0 && <li className="text-black/40 italic">No investigators registered.</li>}
+                                          {gameState.players.length === 0 && <li className="text-black/40 italic">Waiting for investigators...</li>}
                                       </ul>
                                   </div>
                               </div>
