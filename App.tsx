@@ -1,3 +1,4 @@
+
 import React, { useState, useEffect, useRef } from 'react';
 import { 
   GameState, GamePhase, Player, Investigator, Attribute, 
@@ -441,9 +442,13 @@ const App: React.FC = () => {
   // STEP 1: PREPARE ITEMS
   const prepareItemDistribution = () => {
      // Only Host can start this
+     // IMPORTANT: Read from Ref to ensure we have the absolute latest player list, 
+     // even if React hasn't fully re-rendered the component's scope yet.
+     const currentPlayers = gameStateRef.current.players;
+     
      if (gameState.networkMode === NetworkMode.Client) return;
 
-     const numPlayers = gameState.players.length;
+     const numPlayers = currentPlayers.length;
      const numItemsToGenerate = numPlayers + 1;
      
      const allItemKeys = Object.keys(ITEMS);
@@ -484,6 +489,7 @@ const App: React.FC = () => {
      }
 
      setDistributionItems(selected);
+     // Note: We use 'prev' in setGameState, but we ensure phase transition happens with known data
      setGameState(prev => ({...prev, phase: GamePhase.ItemDistribution}));
   };
 
@@ -512,18 +518,22 @@ const App: React.FC = () => {
   // STEP 2: FINALIZE START
   const generateMapAndIntro = async () => {
     if (gameState.networkMode === NetworkMode.Client) return; // Only host starts
+    
+    // USE REF STATE TO GUARANTEE PLAYERS ARE INCLUDED
+    const currentState = gameStateRef.current;
+    
     setLoading(true);
     
     try {
         // Create Item Deck for Game (Exclude distributed items)
-        const distributed = gameState.players.flatMap(p => p.items);
+        const distributed = currentState.players.flatMap(p => p.items);
         const remainingItems = STARTING_ITEMS.filter(i => !distributed.includes(i));
         for (let i = remainingItems.length - 1; i > 0; i--) {
             const j = Math.floor(Math.random() * (i + 1));
             [remainingItems[i], remainingItems[j]] = [remainingItems[j], remainingItems[i]];
         }
 
-        const intro = await GeminiService.generateIntro(gameState.difficulty, gameState.players);
+        const intro = await GeminiService.generateIntro(currentState.difficulty, currentState.players);
         
         const dirs = ['North', 'South', 'East', 'West'];
         const hallDir = dirs[Math.floor(Math.random() * dirs.length)];
@@ -618,6 +628,9 @@ const App: React.FC = () => {
 
         setGameState(prev => ({
           ...prev,
+          // CRITICAL FIX: Ensure we are using the players from the REF (latest), just in case prev is slightly stale or to be explicit
+          // Although 'prev' is usually safe, 'currentState' (Ref) guarantees we grabbed the state at the start of THIS function execution
+          players: currentState.players, 
           phase: GamePhase.Playing,
           round: 1,
           tiles: tiles,
@@ -626,7 +639,7 @@ const App: React.FC = () => {
           storyContext: safeIntroText,
           log: [safeIntroText],
           evidenceCollected: 0,
-          evidenceRequired: 4 + Math.floor(gameState.players.length / 2), 
+          evidenceRequired: 4 + Math.floor(currentState.players.length / 2), 
           isEscapeOpen: false
         }));
         
