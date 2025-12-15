@@ -33,7 +33,7 @@ const App: React.FC = () => {
     currentPlayerIndex: 0,
     tiles: [],
     tokens: [],
-    itemDeck: [], // Stores unique items available to be found
+    itemDeck: [], 
     log: [],
     storyContext: '',
     evidenceCollected: 0,
@@ -102,7 +102,7 @@ const App: React.FC = () => {
   const addLog = (msg: string, narrate = true) => {
     setGameState(prev => ({
       ...prev,
-      log: [...prev.log, msg]
+      log: [...prev.log, msg].slice(-50) // Keep log size manageable for network sync
     }));
     if (narrate) {
         speak(msg);
@@ -124,10 +124,22 @@ const App: React.FC = () => {
   // Host: Broadcast state changes to all clients
   useEffect(() => {
       if (gameState.networkMode === NetworkMode.Host && connectionsRef.current.length > 0) {
-          const syncData = { type: 'SYNC', state: gameState };
+          // SANITIZE STATE BEFORE SENDING
+          // Ensure log isn't too huge and no weird non-serializable objects slipped in
+          const safeState = {
+              ...gameState,
+              log: gameState.log.slice(-50) // Truncate log history for network performance
+          };
+          
+          const syncData = { type: 'SYNC', state: safeState };
+          
           connectionsRef.current.forEach(conn => {
               if (conn.open) {
-                  conn.send(syncData);
+                  try {
+                      conn.send(syncData);
+                  } catch (e) {
+                      console.error("Failed to sync state to client:", e);
+                  }
               }
           });
       }
@@ -164,11 +176,14 @@ const App: React.FC = () => {
           conn.on('open', () => {
               console.log("Host connection fully opened with", conn.peer);
               // Send immediate sync using REF to ensure fresh state
-              conn.send({ type: 'SYNC', state: gameStateRef.current });
+              try {
+                  conn.send({ type: 'SYNC', state: gameStateRef.current });
+              } catch (e) {
+                  console.error("Failed to send initial sync:", e);
+              }
           });
           
           conn.on('data', (data: any) => {
-              console.log("Host RAW Data Received:", data);
               // Call the ref, which points to the fresh handleNetworkData from current render
               if (handleNetworkDataRef.current) {
                   handleNetworkDataRef.current(data);
@@ -219,7 +234,7 @@ const App: React.FC = () => {
 
       peer.on('open', () => {
           console.log("Client Peer Open. ID:", peer.id);
-          // Standard connection (no explicit serialization to avoid mismatches)
+          // Standard connection
           const conn = peer.connect(targetPeerId);
           clientConnRef.current = conn;
           
@@ -232,7 +247,6 @@ const App: React.FC = () => {
           });
 
           conn.on('data', (data: any) => {
-              // console.log("Client Received Data:", data); // Verbose
               if (data.type === 'SYNC') {
                   // Client receives authoritative state from Host
                   setGameState(data.state);
@@ -245,7 +259,6 @@ const App: React.FC = () => {
              alert("Connection Error: " + err);
           });
           
-          // Close handler?
           conn.on('close', () => {
               alert("Disconnected from host.");
               resetGame();
@@ -284,35 +297,40 @@ const App: React.FC = () => {
           }
       }
 
-      console.log("Handling Network Action:", data.type);
+      console.log("Handling Network Action:", data.type, data.payload);
 
       if (currentState.networkMode !== NetworkMode.Host) {
-          console.warn("Ignoring action because not Host.");
           return;
       }
 
       if (data.type === 'ACTION_REGISTER_PLAYER') {
+          const newPlayer = data.payload;
+          
+          // STRICT VALIDATION: Ensure payload is valid before state update
+          if (!newPlayer || !newPlayer.id || !newPlayer.name) {
+              console.error("Invalid Register Payload:", newPlayer);
+              return;
+          }
+
           setGameState(prev => {
-              // Allow updating if already exists (re-register logic) to handle retries
-              const existsIndex = prev.players.findIndex(p => p.id === data.payload.id);
+              const existsIndex = prev.players.findIndex(p => p.id === newPlayer.id);
               let updatedPlayers = [...prev.players];
               
               if (existsIndex !== -1) {
-                  // Update existing
-                  console.log("Updating existing player:", data.payload);
-                  updatedPlayers[existsIndex] = data.payload;
+                  console.log("Updating existing player:", newPlayer.name);
+                  updatedPlayers[existsIndex] = newPlayer;
               } else {
-                  console.log("Registering New Player:", data.payload);
-                  updatedPlayers.push(data.payload);
+                  console.log("Registering New Player:", newPlayer.name);
+                  updatedPlayers.push(newPlayer);
               }
 
               return {
                   ...prev,
                   players: updatedPlayers,
-                  log: [...prev.log, `${data.payload.name} has joined the roster.`]
+                  log: [...prev.log, `${newPlayer.name} has joined the roster.`].slice(-50)
               };
           });
-          speak(`${data.payload.name} has joined the roster.`);
+          speak(`${newPlayer.name} has joined the roster.`);
       }
       else if (data.type === 'ACTION_PLAYER_READY') {
           setGameState(prev => ({
@@ -341,7 +359,6 @@ const App: React.FC = () => {
           handleUseItem(data.payload.item, true); 
       }
       else if (data.type === 'ACTION_COMPLETE_TASK') {
-          // New: Client reports completion of a task (Dice Roll or Puzzle)
           handleActionComplete(data.payload.context, data.payload.success, data.payload.data);
       }
   };
@@ -355,10 +372,15 @@ const App: React.FC = () => {
   const sendAction = (type: string, payload: any) => {
       if (clientConnRef.current && clientConnRef.current.open) {
           console.log("Sending Action:", type, payload);
-          clientConnRef.current.send({ type, payload });
+          try {
+              clientConnRef.current.send({ type, payload });
+          } catch (e) {
+              console.error("Failed to send action:", e);
+              alert("Transmission failed. Reconnecting...");
+          }
       } else {
-          console.warn("Cannot send action, connection not open. State:", clientConnRef.current?.open);
-          alert("Connection to host lost or not ready. Try again.");
+          console.warn("Cannot send action, connection not open.");
+          alert("Connection lost. Please rejoin.");
       }
   };
 
@@ -453,7 +475,6 @@ const App: React.FC = () => {
         // Send player to host
         console.log("Client Sending Register Action:", newPlayer);
         sendAction('ACTION_REGISTER_PLAYER', newPlayer);
-        // We do NOT add to local state immediately; wait for Sync from Host
     } else {
         // Host adds immediately
         setGameState(prev => ({
@@ -475,9 +496,6 @@ const App: React.FC = () => {
 
   // STEP 1: PREPARE ITEMS
   const prepareItemDistribution = () => {
-     // Only Host can start this
-     // IMPORTANT: Read from Ref to ensure we have the absolute latest player list, 
-     // even if React hasn't fully re-rendered the component's scope yet.
      const currentPlayers = gameStateRef.current.players;
      
      if (gameState.networkMode === NetworkMode.Client) return;
@@ -523,12 +541,10 @@ const App: React.FC = () => {
      }
 
      setDistributionItems(selected);
-     // Note: We use 'prev' in setGameState, but we ensure phase transition happens with known data
      setGameState(prev => ({...prev, phase: GamePhase.ItemDistribution}));
   };
 
   const assignItemToPlayer = (playerIndex: number) => {
-      // Only host logic for simplicity in distribution phase
       if (gameState.networkMode === NetworkMode.Client) return;
 
       if (selectedDistItem === null) return;
@@ -552,14 +568,11 @@ const App: React.FC = () => {
   // STEP 2: FINALIZE START
   const generateMapAndIntro = async () => {
     if (gameState.networkMode === NetworkMode.Client) return; // Only host starts
-    
-    // USE REF STATE TO GUARANTEE PLAYERS ARE INCLUDED
     const currentState = gameStateRef.current;
     
     setLoading(true);
     
     try {
-        // Create Item Deck for Game (Exclude distributed items)
         const distributed = currentState.players.flatMap(p => p.items);
         const remainingItems = STARTING_ITEMS.filter(i => !distributed.includes(i));
         for (let i = remainingItems.length - 1; i > 0; i--) {
@@ -589,15 +602,13 @@ const App: React.FC = () => {
 
         const inverseDir = (d: string) => d === 'North' ? 'South' : d === 'South' ? 'North' : d === 'East' ? 'West' : 'East';
         
-        // Calculate Hall Dimensions
         const h1x = hV.x, h1y = hV.y;
         const h2x = hV.x * 2, h2y = hV.y * 2;
         const hallMinX = Math.min(h1x, h2x);
         const hallMinY = Math.min(h1y, h2y);
-        const hallW = Math.abs(h2x - h1x) + 1; // Simplified width calc for straight line
+        const hallW = Math.abs(h2x - h1x) + 1;
         const hallH = Math.abs(h2y - h1y) + 1;
 
-        // Calculate Parlor Dimensions
         const p1x = pV.x, p1y = pV.y;
         const p2x = pV.x * 2, p2y = pV.y * 2;
         const parlorMinX = Math.min(p1x, p2x);
@@ -605,7 +616,6 @@ const App: React.FC = () => {
         const parlorW = Math.abs(p2x - p1x) + 1;
         const parlorH = Math.abs(p2y - p1y) + 1;
 
-        // Generate Images with correct dimensions AND door locations
         const foyerImg = generateRoomImage(`Foyer, ${intro.startingRoomDescription}, doors on the ${hallDir} and ${parlorDir} walls, square room`, 1, 1);
         const hallImg = generateRoomImage(`Grand Hall, A long rectangular corridor lined with portraits, containing a Strange Painting, door on the ${inverseDir(hallDir)} wall, detailed floor plan`, 2, 1); // Approx
         const parlorImg = generateRoomImage(`The Parlor, cozy with a fireplace and armchairs, rug on floor, tea table, door on the ${inverseDir(parlorDir)} wall, detailed floor plan`, 2, 1); // Approx
@@ -616,7 +626,7 @@ const App: React.FC = () => {
         };
         
         const hallRoomId = 'room_start_hall';
-        const hallTile1: Tile = { id: 'tile_hall_1', roomId: hallRoomId, name: formatRoomName('Grand Hall'), description: "A long corridor lined with portraits.", x: h1x, y: h1y, imageType: 'hallway', roomImage: hallImg, roomX: hallMinX, roomY: hallMinY, roomWidth: 2, roomHeight: 2 }; // Simplified logic
+        const hallTile1: Tile = { id: 'tile_hall_1', roomId: hallRoomId, name: formatRoomName('Grand Hall'), description: "A long corridor lined with portraits.", x: h1x, y: h1y, imageType: 'hallway', roomImage: hallImg, roomX: hallMinX, roomY: hallMinY, roomWidth: 2, roomHeight: 2 };
         const hallTile2: Tile = { id: 'tile_hall_2', roomId: hallRoomId, name: formatRoomName('Grand Hall'), description: "A long corridor lined with portraits.", x: h2x, y: h2y, imageType: 'hallway', roomImage: hallImg, roomX: hallMinX, roomY: hallMinY, roomWidth: 2, roomHeight: 2 };
 
         const parlorRoomId = 'room_start_parlor';
@@ -657,13 +667,10 @@ const App: React.FC = () => {
             });
         });
 
-        // Safe log creation
         const safeIntroText = intro && intro.introText ? intro.introText : "The game begins.";
 
         setGameState(prev => ({
           ...prev,
-          // CRITICAL FIX: Ensure we are using the players from the REF (latest), just in case prev is slightly stale or to be explicit
-          // Although 'prev' is usually safe, 'currentState' (Ref) guarantees we grabbed the state at the start of THIS function execution
           players: currentState.players, 
           phase: GamePhase.Playing,
           round: 1,
@@ -689,7 +696,6 @@ const App: React.FC = () => {
   // --- Core Game Logic ---
 
   const handleUseItem = (item: string, remote = false) => {
-      // Network Check
       if (gameState.networkMode === NetworkMode.Client && !remote) {
           sendAction('ACTION_USE_ITEM', { item });
           return;
@@ -748,7 +754,6 @@ const App: React.FC = () => {
           updatePlayer({ actionsRemaining: player.actionsRemaining + 2, items: consumeItem() });
           addLog(`${player.name} checks the Pocket Watch. Time seems to slow (+2 Actions).`);
       } else if (item === "Kerosene") {
-          // Check for monsters in same space
           const monstersInSpace = gameState.monsters.filter(m => m.x === player.x && m.y === player.y);
           if (monstersInSpace.length > 0) {
               const target = monstersInSpace[0];
@@ -773,10 +778,6 @@ const App: React.FC = () => {
   };
 
   const handleConsumeItem = (item: string) => {
-      // DiceRoller logic is tricky to network completely without refactoring.
-      // For now, Client DiceRolls are local, but effects need to sync.
-      // We'll let Client resolve result then send final outcome or consume item action.
-      // This is a simplified "Trust the Client" model for items used during rolls.
       if (gameState.networkMode === NetworkMode.Client) {
           sendAction('ACTION_USE_ITEM', { item });
           return;
@@ -787,12 +788,11 @@ const App: React.FC = () => {
       setGameState(prev => ({
           ...prev,
           players: prev.players.map(p => p.id === player.id ? { ...p, items: newItems } : p),
-          log: [...prev.log, `${player.name} used ${item}.`]
+          log: [...prev.log, `${player.name} used ${item}.`].slice(-50)
       }));
   };
 
   const handleMarkItemUsed = () => {
-      // Simplification: Not syncing this granularly in this response for clients
       const player = gameState.players[gameState.currentPlayerIndex];
       setGameState(prev => ({
           ...prev,
@@ -815,7 +815,7 @@ const App: React.FC = () => {
           if (newHealth <= 0) {
               if (player.isWounded) {
                   elimMsg = `${player.name} has succumbed to their wounds!`;
-                  return { ...prev, players: prev.players.filter(p => p.id !== playerId), log: [...prev.log, elimMsg] };
+                  return { ...prev, players: prev.players.filter(p => p.id !== playerId), log: [...prev.log, elimMsg].slice(-50) };
               } else {
                   newIsWounded = true;
                   const template = INVESTIGATOR_TEMPLATES.find(t => t.id === player.investigatorId);
@@ -851,7 +851,7 @@ const App: React.FC = () => {
           return {
               ...prev,
               players: prev.players.map(p => p.id === playerId ? updatedPlayer : p),
-              log: logMsg ? [...prev.log, logMsg] : prev.log
+              log: logMsg ? [...prev.log, logMsg].slice(-50) : prev.log
           };
       });
 
@@ -900,7 +900,6 @@ const App: React.FC = () => {
           if (token) {
               resolveSearch(token, success, data); // data is rolls array
           } else {
-              // Token likely gone already?
               setGameState(prev => ({ ...prev, phase: GamePhase.Playing, activeDiceRoll: undefined, activePuzzle: undefined }));
           }
       } else if (context.type === 'COMBAT') {
@@ -950,7 +949,6 @@ const App: React.FC = () => {
     const currentState = gameStateRef.current;
     if (currentState.phase !== GamePhase.Playing) return;
 
-    // Network Check
     if (currentState.networkMode === NetworkMode.Client && !remote) {
         sendAction('ACTION_TOKEN_CLICK', { tokenId: token.id });
         return;
@@ -964,7 +962,6 @@ const App: React.FC = () => {
     }
 
     if (token.type === TokenType.Escape) {
-        // WIN CONDITION
         setGameState(prev => ({ ...prev, phase: GamePhase.Victory }));
         speak("You burst through the heavy doors into the cool night air. You have survived the night.");
         return;
@@ -1090,10 +1087,8 @@ const App: React.FC = () => {
       const width = maxX - minX + 1;
       const height = maxY - minY + 1;
       
-      // Determine Entry Door Position (Inverse of move direction)
       const entryDirection = dir === 'North' ? 'South' : dir === 'South' ? 'North' : dir === 'East' ? 'West' : 'East';
 
-      // Pre-calculate Exits to include in Image Prompt
       const exitCount = isHallway ? 2 : (Math.random() > 0.6 ? 2 : 1);
       const possibleDirs = ['North', 'South', 'East', 'West'].filter(d => {
           if (dir === 'North' && d === 'South') return false;
@@ -1110,9 +1105,7 @@ const App: React.FC = () => {
           selectedExits.push(exDir);
       }
 
-      // Construct Prompt with Door Locations
       const doors = [entryDirection, ...selectedExits];
-      // Format as "doors on North and West walls"
       const doorString = `doors on the ${doors.join(' and ')} walls`;
 
       const roomImgPrompt = `${roomName}, ${roomData.description}, ${doorString}, ${roomData.visualType} style`;
@@ -1143,9 +1136,7 @@ const App: React.FC = () => {
           });
       });
 
-      // Add Tokens for the selected exits
       selectedExits.forEach((exDir, i) => {
-          // Find a valid tile for this direction (one that is on the edge)
           const candidates = newTiles.filter(t => {
              if (exDir === 'North') return t.y === minY;
              if (exDir === 'South') return t.y === maxY;
@@ -1185,14 +1176,13 @@ const App: React.FC = () => {
         tokens: [...updatedTokens, ...newTokens],
         players: updatedPlayers,
         storyContext: prev.storyContext + ` They entered ${roomName}. ${roomData.description}`,
-        log: [...prev.log, `${player.name} explores ${roomName}. ${roomData.description}`]
+        log: [...prev.log, `${player.name} explores ${roomName}. ${roomData.description}`].slice(-50)
       }));
       
       speak(`${player.name} opens the door to ${roomName}. ${roomData.description}`);
       setLoading(false);
 
     } else if (token.type === TokenType.Search) {
-      // 30% Chance to trigger a Puzzle instead of a simple roll
       if (Math.random() > 0.7) {
           const rand = Math.random();
           let puzzleType = PuzzleType.Sliding;
@@ -1238,7 +1228,6 @@ const App: React.FC = () => {
          activePuzzle: undefined 
      }));
 
-     // Calculate reward BEFORE checking AI so we can tell the story
      let rewardType: 'None' | 'Evidence' | 'Item' | 'Clue' = 'None';
      let foundObjectName = '';
 
@@ -1246,15 +1235,14 @@ const App: React.FC = () => {
          const roll = Math.random();
          const state = gameStateRef.current;
          
-         // Adjusted probabilities: Evidence is now much rarer (20% instead of 45%)
          if (!state.isEscapeOpen && roll < 0.20) { 
              rewardType = 'Evidence';
              foundObjectName = 'Incriminating Evidence';
-         } else if (roll < 0.65 && state.itemDeck.length > 0) { // Items cover 0.20 to 0.65 (45% chance)
+         } else if (roll < 0.65 && state.itemDeck.length > 0) {
              rewardType = 'Item';
-             foundObjectName = state.itemDeck[state.itemDeck.length - 1]; // Peek
+             foundObjectName = state.itemDeck[state.itemDeck.length - 1];
          } else {
-             rewardType = 'Clue'; // Clues cover the rest (35% chance)
+             rewardType = 'Clue'; 
              foundObjectName = 'a Clue';
          }
      }
@@ -1285,7 +1273,6 @@ const App: React.FC = () => {
                    currentPlayer.items.push(popped);
                    rewardMsg = `Found: ${popped}`;
                } else {
-                   // Fallback logic if deck sync issue
                    currentPlayer.clues++;
                    rewardMsg = "Found: 1 Clue";
                }
@@ -1308,7 +1295,7 @@ const App: React.FC = () => {
           players: newPlayers,
           tokens: newTokens,
           itemDeck: newItemDeck,
-          log: [...prev.log, logMsg],
+          log: [...prev.log, logMsg].slice(-50),
           storyContext: prev.storyContext + ` Investigation of ${token.description}: ${narrative}`,
           evidenceCollected: newEvidenceCount
         };
@@ -1353,15 +1340,13 @@ const App: React.FC = () => {
                     isEscapeOpen: true,
                     monsters: [...current.monsters, boss],
                     tokens: [...current.tokens, escapeToken],
-                    log: [...current.log, `FINALE: ${finaleMsg}`]
+                    log: [...current.log, `FINALE: ${finaleMsg}`].slice(-50)
                 };
             }
             return current;
         });
      }, 100);
 
-     // Narrator Voice Logic
-     // Ensure punctuation exists so the TTS doesn't run-on into the inventory message
      let spokenText = narrative.trim();
      if (spokenText && !/[.!?]$/.test(spokenText)) {
          spokenText += ".";
@@ -1371,9 +1356,7 @@ const App: React.FC = () => {
          if (rewardType === 'Item') spokenText += ` ${foundObjectName} added to inventory.`;
          else if (rewardType === 'Clue') spokenText += ` Clue added to inventory.`;
          else if (rewardType === 'Evidence') spokenText += ` Evidence collected.`;
-     } else {
-         // narrative handles the failure description
-     }
+     } 
 
      if (success) spokenText += (gameState.evidenceCollected + 1 >= gameState.evidenceRequired ? " You feel you are close to the truth." : "");
 
@@ -1446,7 +1429,7 @@ const App: React.FC = () => {
               monsters: newMonsters,
               players: newPlayers,
               mythosEvent: { text: logMsg, type: event.type as any },
-              log: [...prev.log, logMsg]
+              log: [...prev.log, logMsg].slice(-50)
           }));
           speak(logMsg);
       } catch (e) {
@@ -1475,7 +1458,7 @@ const App: React.FC = () => {
              monsters: newMonsters,
              phase: GamePhase.Playing,
              activeDiceRoll: undefined,
-             log: [...prev.log, msg]
+             log: [...prev.log, msg].slice(-50)
          };
      });
   };
